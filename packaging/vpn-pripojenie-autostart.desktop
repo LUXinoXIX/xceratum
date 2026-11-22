@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=VPN Pripojenie
+Comment=Spustí VPN Pripojenie po prihlásení (ikona v lište)
+Exec=vpn-pripojenie --skryte
+Icon=vpn-pripojenie
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=3

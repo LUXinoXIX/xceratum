@@ -1,0 +1,37 @@
+Name:           vpn-pripojenie
+Version:        @VERSION@
+Release:        1%{?dist}
+Summary:        Grafické okno nad Cisco Secure Client (VPN)
+License:        Proprietary
+URL:            https://github.com/LUXinoXIX/xceratum
+BuildArch:      noarch
+Requires:       python3 >= 3.10, python3-pyqt6, openssl, polkit
+Recommends:     libnotify, libsecret, gnome-shell-extension-appindicator, policycoreutils
+
+%description
+VPN Pripojenie je prihlasovacie okno nad príkazovým riadkom Cisco Secure
+Client: roletka pripojení, meno, heslo a kód z autentifikátora, ikona
+v lište, obnovovanie spojenia a správa XML profilov a certifikátov.
+Cisco Secure Client sa inštaluje zvlášť.
+
+%install
+mkdir -p %{buildroot}
+cp -a @STAGE@/. %{buildroot}/
+
+%post
+update-desktop-database -q %{_datadir}/applications >/dev/null 2>&1 || :
+touch --no-create %{_datadir}/icons/hicolor >/dev/null 2>&1 || :
+
+%postun
+update-desktop-database -q %{_datadir}/applications >/dev/null 2>&1 || :
+
+%files
+%attr(0755,root,root) /usr/bin/vpn-pripojenie
+/usr/share/vpn-pripojenie
+%attr(0755,root,root) /usr/libexec/vpn-pripojenie/vpn-pripojenie-helper
+%dir /usr/libexec/vpn-pripojenie
+/usr/share/polkit-1/actions/sk.vpnpripojenie.policy
+/usr/share/applications/vpn-pripojenie.desktop
+%config(noreplace) /etc/xdg/autostart/vpn-pripojenie.desktop
+/usr/share/icons/hicolor/scalable/apps/vpn-pripojenie.svg
+%doc /usr/share/doc/vpn-pripojenie

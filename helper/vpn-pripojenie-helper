@@ -1,0 +1,257 @@
+#!/usr/bin/python3 -I
+"""VPN Pripojenie – pomocný skript s právami správcu (spúšťa ho pkexec, polkit akcia sk.vpnpripojenie.manage).
+
+Dovolí len tieto operácie:
+  install-profile <súbor.xml> <priečinok profilov>   nainštaluje XML profil Cisca
+  remove-profile  <názov.xml> <priečinok profilov>   odstráni XML profil (záloha do .../backup)
+  install-ca      <súbor.pem>                         CA certifikát pre všetkých (/opt/.cisco/certificates/ca)
+  remove-ca       <názov.pem>                         odstráni CA pre všetkých
+  restart-agent                                       reštartuje službu Cisca vpnagentd
+  save-config     <súbor.json>                        uloží nastavenia správcu (/etc/vpn-pripojenie/config.json)
+
+Zdrojové súbory číta s právami používateľa, ktorý akciu vyvolal (PKEXEC_UID) – nedá sa ním teda
+skopírovať súbor, ku ktorému používateľ sám nemá prístup. Na Fedore (SELinux) po zápise spustí restorecon.
+"""
+import json
+import os
+import pwd
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import xml.etree.ElementTree as ET
+
+PROFILE_DIRS = ("/opt/cisco/secureclient/vpn/profile", "/opt/cisco/anyconnect/profile")
+CA_DIR = "/opt/.cisco/certificates/ca"
+CONFIG_DIR = "/etc/vpn-pripojenie"
+MAX_BYTES = 1024 * 1024
+LOG = "/var/log/vpn-pripojenie-helper.log"
+
+
+def die(msg, code=2):
+    log("CHYBA " + msg)
+    print(msg, file=sys.stderr)
+    sys.exit(code)
+
+
+def log(msg):
+    try:
+        with open(LOG, "a", encoding="utf-8") as f:
+            f.write(time.strftime("%Y-%m-%d %H:%M:%S") + f" uid={os.environ.get('PKEXEC_UID', '?')} {msg}\n")
+        os.chmod(LOG, 0o640)
+    except OSError:
+        pass
+
+
+def read_as_user(path):
+    """Prečíta súbor s právami používateľa, ktorý spustil pkexec."""
+    uid = os.environ.get("PKEXEC_UID")
+    if uid is None or not uid.isdigit():
+        if os.getuid() == 0 and os.environ.get("SUDO_UID") is None:
+            return _read(path)          # spustené priamo ako root (napr. inštalátor)
+        die("Chýba PKEXEC_UID.")
+    pw = pwd.getpwuid(int(uid))
+    groups = os.getgrouplist(pw.pw_name, pw.pw_gid)
+    os.setgroups(groups)
+    os.setegid(pw.pw_gid)
+    os.seteuid(pw.pw_uid)
+    try:
+        return _read(path)
+    finally:
+        os.seteuid(0)
+        os.setegid(0)
+        os.setgroups([])
+
+
+def _read(path):
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as e:
+        die(f"Súbor sa nedá otvoriť: {path} ({e.strerror})")
+    with os.fdopen(fd, "rb") as f:
+        import stat
+        if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+            die("Nie je to obyčajný súbor.")
+        data = f.read(MAX_BYTES + 1)
+    if len(data) > MAX_BYTES:
+        die("Súbor je príliš veľký.")
+    return data
+
+
+def safe_name(name, suffix):
+    base = os.path.basename(name)
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+ -]{0,100}", base) or not base.lower().endswith(suffix):
+        die(f"Nepovolený názov súboru: {base!r}")
+    return base
+
+
+def allowed_profile_dir(d):
+    d = os.path.normpath(d)
+    if d not in PROFILE_DIRS:
+        die(f"Nepovolený priečinok profilov: {d}")
+    return d
+
+
+def restorecon(path):
+    exe = shutil.which("restorecon")
+    if exe:
+        subprocess.run([exe, "-F", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def atomic_write(dest, data, mode=0o644):
+    d = os.path.dirname(dest)
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".vpn-pripojenie-")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.chmod(tmp, mode)
+        os.chown(tmp, 0, 0)
+        os.replace(tmp, dest)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    restorecon(dest)
+
+
+def backup(path):
+    if os.path.exists(path):
+        bdir = os.path.join(os.path.dirname(path), "backup")
+        os.makedirs(bdir, mode=0o755, exist_ok=True)
+        dest = os.path.join(bdir, time.strftime("%Y%m%d-%H%M%S-") + os.path.basename(path))
+        shutil.copy2(path, dest)
+        return dest
+    return None
+
+
+# ------------------------------------------------------------------ príkazy
+
+def install_profile(src, pdir):
+    pdir = allowed_profile_dir(pdir)
+    name = safe_name(src, ".xml")
+    data = read_as_user(src)
+    try:
+        root = ET.fromstring(data)
+    except ET.ParseError as e:
+        die(f"XML profil je poškodený: {e}")
+    if root.tag.rsplit("}", 1)[-1] != "AnyConnectProfile":
+        die("Súbor nie je profil Cisco Secure Client (chýba AnyConnectProfile).")
+    hosts = [el for el in root.iter() if el.tag.rsplit("}", 1)[-1] == "HostEntry"]
+    os.makedirs(pdir, mode=0o755, exist_ok=True)
+    restorecon(pdir)
+    dest = os.path.join(pdir, name)
+    b = backup(dest)
+    atomic_write(dest, data)
+    log(f"install-profile {dest} (HostEntry: {len(hosts)}, záloha: {b})")
+    n = len(hosts)
+    word = "pripojenie" if n == 1 else ("pripojenia" if 2 <= n <= 4 else "pripojení")
+    print(f"Profil {name} je nainštalovaný ({n} {word})." + (" Pôvodný je v zálohe." if b else ""))
+
+
+def remove_profile(name, pdir):
+    pdir = allowed_profile_dir(pdir)
+    name = safe_name(name, ".xml")
+    path = os.path.join(pdir, name)
+    if not os.path.isfile(path):
+        die(f"Profil {name} neexistuje.")
+    b = backup(path)
+    os.unlink(path)
+    log(f"remove-profile {path} (záloha: {b})")
+    print(f"Profil {name} je odstránený (záloha: {b}).")
+
+
+def install_ca(src):
+    name = safe_name(src, ".pem")
+    data = read_as_user(src)
+    if b"-----BEGIN CERTIFICATE-----" not in data or b"PRIVATE KEY" in data:
+        die("Súbor nie je certifikát PEM.")
+    fd, tmp = tempfile.mkstemp(suffix=".pem")
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
+    p = subprocess.run(["openssl", "x509", "-noout", "-subject", "-in", tmp], stdout=subprocess.PIPE,
+                       stderr=subprocess.DEVNULL)
+    os.unlink(tmp)
+    if p.returncode != 0:
+        die("Súbor nie je platný certifikát.")
+    os.makedirs(CA_DIR, mode=0o755, exist_ok=True)
+    restorecon(os.path.dirname(CA_DIR))
+    restorecon(CA_DIR)
+    dest = os.path.join(CA_DIR, name)
+    atomic_write(dest, data)
+    log(f"install-ca {dest} {p.stdout.decode(errors='replace').strip()}")
+    print(f"CA certifikát {name} je nainštalovaný pre všetkých používateľov.")
+
+
+def remove_ca(name):
+    name = safe_name(name, ".pem")
+    path = os.path.join(CA_DIR, name)
+    if not os.path.isfile(path):
+        die(f"Certifikát {name} neexistuje.")
+    if "VeriSign" in name:      # Cisco ho potrebuje na overenie podpisu kódu
+        die("Tento certifikát patrí Ciscu a nesmie sa odstrániť.")
+    b = backup(path)
+    os.unlink(path)
+    log(f"remove-ca {path} (záloha: {b})")
+    print(f"CA certifikát {name} je odstránený.")
+
+
+def restart_agent():
+    p = subprocess.run(["systemctl", "restart", "vpnagentd"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    log(f"restart-agent rc={p.returncode}")
+    if p.returncode != 0:
+        die("Službu vpnagentd sa nepodarilo reštartovať: " + p.stdout.decode(errors="replace").strip())
+    print("Služba Cisca (vpnagentd) je reštartovaná.")
+
+
+def save_config(src):
+    data = read_as_user(src)
+    try:
+        cfg = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as e:
+        die(f"Nastavenia nie sú platný JSON: {e}")
+    if not isinstance(cfg, dict) or not isinstance(cfg.get("Polozky", []), list):
+        die("Nastavenia nemajú správny tvar.")
+    allowed = {"NazovAplikacie", "DefaultAuth", "Group", "VpnCliPath", "ConnectTimeoutSeconds", "Vzhlad",
+               "SkrytPoSekundach", "PriOdpojeniOtvoritOkno", "AutoPrijatBanner", "PovolitKlucenku",
+               "PouzitPty", "Polozky"}
+    unknown = set(cfg) - allowed
+    if unknown:
+        die("Neznáme položky v nastaveniach: " + ", ".join(sorted(unknown)))
+    cli = str(cfg.get("VpnCliPath", "") or "")
+    if cli and not re.fullmatch(r"/opt/cisco/[A-Za-z0-9._/-]+/vpn", cli):
+        die("Cesta k Cisco CLI musí byť v /opt/cisco/…/vpn.")
+    os.makedirs(CONFIG_DIR, mode=0o755, exist_ok=True)
+    dest = os.path.join(CONFIG_DIR, "config.json")
+    if os.path.exists(dest):
+        shutil.copy2(dest, dest + ".bak")
+    atomic_write(dest, (json.dumps(cfg, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+    log(f"save-config {dest} ({len(cfg.get('Polozky', []))} položiek)")
+    print("Nastavenia sú uložené.")
+
+
+def main(argv):
+    if os.geteuid() != 0:
+        die("Pomocný skript musí bežať s právami správcu (cez pkexec).", 1)
+    if not argv:
+        die(__doc__, 1)
+    cmd, args = argv[0], argv[1:]
+    table = {
+        "install-profile": (install_profile, 2),
+        "remove-profile": (remove_profile, 2),
+        "install-ca": (install_ca, 1),
+        "remove-ca": (remove_ca, 1),
+        "restart-agent": (restart_agent, 0),
+        "save-config": (save_config, 1),
+    }
+    if cmd not in table or len(args) != table[cmd][1]:
+        die(f"Neznámy príkaz alebo nesprávny počet argumentov: {cmd}", 1)
+    os.umask(0o022)
+    table[cmd][0](*args)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

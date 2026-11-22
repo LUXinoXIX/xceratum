@@ -1,0 +1,11 @@
+#!/bin/sh
+# VPN Pripojenie – spúšťač (/usr/bin/vpn-pripojenie)
+# Python s PyQt6: systémový (python3-pyqt6), na Ubuntu 22.04 venv vytvorený pri inštalácii.
+APPDIR=/usr/share/vpn-pripojenie
+PY=/usr/bin/python3
+if [ -x /opt/vpn-pripojenie/venv/bin/python3 ]; then
+    PY=/opt/vpn-pripojenie/venv/bin/python3
+fi
+PYTHONPATH="$APPDIR${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH
+exec "$PY" -m vpn_pripojenie "$@"

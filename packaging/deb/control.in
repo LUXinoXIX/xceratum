@@ -1,0 +1,15 @@
+Package: vpn-pripojenie
+Version: @VERSION@
+Architecture: all
+Maintainer: VPN Pripojenie <vpn-pripojenie@localhost>
+Section: net
+Priority: optional
+Depends: python3 (>= 3.10), openssl, pkexec | policykit-1
+Recommends: python3-pyqt6, libnotify-bin, libsecret-tools, gnome-shell-extension-appindicator, libxcb-cursor0, python3-venv
+Installed-Size: @SIZE@
+Homepage: https://github.com/LUXinoXIX/xceratum
+Description: Grafické okno nad Cisco Secure Client (VPN)
+ VPN Pripojenie je prihlasovacie okno nad príkazovým riadkom Cisco Secure
+ Client: roletka pripojení, meno, heslo a kód z autentifikátora, ikona
+ v lište, obnovovanie spojenia a správa XML profilov a certifikátov.
+ Cisco Secure Client sa inštaluje zvlášť.

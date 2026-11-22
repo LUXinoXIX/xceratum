@@ -1,0 +1,20 @@
+#!/bin/sh
+set -e
+if [ "$1" = "configure" ]; then
+    # Ubuntu 22.04 nemá python3-pyqt6 v repozitári → PyQt6 do venv (len ak ho systém nemá a ani neponúka)
+    if ! /usr/bin/python3 -c "import PyQt6.QtWidgets" >/dev/null 2>&1 \
+       && ! apt-cache show python3-pyqt6 >/dev/null 2>&1; then
+        echo "VPN Pripojenie: PyQt6 v systéme chýba, inštalujem ho do /opt/vpn-pripojenie/venv…"
+        if /usr/bin/python3 -m venv /opt/vpn-pripojenie/venv >/dev/null 2>&1 \
+           && /opt/vpn-pripojenie/venv/bin/pip install --quiet --disable-pip-version-check "PyQt6>=6.4"; then
+            echo "VPN Pripojenie: PyQt6 je pripravené."
+        else
+            rm -rf /opt/vpn-pripojenie/venv
+            echo "VPN Pripojenie: PyQt6 sa nepodarilo nainštalovať (treba internet a balík python3-venv). Potom spustite" >&2
+            echo "  sudo dpkg-reconfigure vpn-pripojenie" >&2
+        fi
+    fi
+    if command -v update-desktop-database >/dev/null 2>&1; then update-desktop-database -q /usr/share/applications || true; fi
+    if command -v gtk-update-icon-cache >/dev/null 2>&1; then gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || true; fi
+fi
+exit 0

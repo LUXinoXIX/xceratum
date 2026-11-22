@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <vendor>VPN Pripojenie</vendor>
+  <icon_name>vpn-pripojenie</icon_name>
+
+  <action id="sk.vpnpripojenie.manage">
+    <description>Manage Cisco VPN profiles and certificates</description>
+    <description xml:lang="sk">Správa VPN profilov a certifikátov Cisco</description>
+    <message>VPN Pripojenie wants to change Cisco Secure Client settings (VPN profile, CA certificate or service).</message>
+    <message xml:lang="sk">VPN Pripojenie chce zmeniť nastavenia Cisco Secure Client (VPN profil, certifikát CA alebo službu). Zadajte heslo správcu počítača.</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/libexec/vpn-pripojenie/vpn-pripojenie-helper</annotate>
+  </action>
+</policyconfig>

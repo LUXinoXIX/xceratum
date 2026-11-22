@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Name=VPN Pripojenie
+GenericName=VPN klient
+Comment=Pripojenie k firemnej VPN cez Cisco Secure Client
+Exec=vpn-pripojenie
+Icon=vpn-pripojenie
+Terminal=false
+Categories=Network;Security;
+Keywords=VPN;Cisco;AnyConnect;Secure Client;
+StartupWMClass=vpn-pripojenie
+StartupNotify=true
+Actions=nastavenia;
+
+[Desktop Action nastavenia]
+Name=Profily a certifikáty
+Exec=vpn-pripojenie --nastavenia

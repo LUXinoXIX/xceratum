@@ -1,0 +1,68 @@
+name: Balíky
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  baliky:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Nástroje (rpmbuild, openssl)
+        run: sudo apt-get update -q && sudo apt-get install -y -q rpm openssl
+
+      - name: Testy
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Verzia sedí so značkou
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          V=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' vpn_pripojenie/__init__.py)
+          if [ "v$V" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Značka $GITHUB_REF_NAME nesedí s verziou $V vo vpn_pripojenie/__init__.py"
+            exit 1
+          fi
+
+      - name: Výroba .deb a .rpm
+        run: ./packaging/build-packages.sh
+
+      - name: Kontrola balíkov
+        run: |
+          dpkg-deb -I dist/*.deb
+          dpkg-deb -c dist/*.deb | grep -q usr/bin/vpn-pripojenie
+          rpm -qip dist/*.rpm
+          rpm -qlp dist/*.rpm | grep -q /usr/bin/vpn-pripojenie
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vpn-pripojenie-baliky
+          path: dist/*
+
+      - name: Vydanie (Release) pri značke v*
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > notes.md <<'NOTES'
+          **Inštalácia**
+
+          Ubuntu 24.04 / 26.04 (x64 aj ARM):
+          ```
+          sudo apt install ./vpn-pripojenie_*_all.deb
+          ```
+          Fedora (x64 aj ARM):
+          ```
+          sudo dnf install ./vpn-pripojenie-*.noarch.rpm
+          ```
+          Cisco Secure Client sa inštaluje zvlášť (x64 alebo arm64 podľa počítača).
+          NOTES
+          gh release create "$GITHUB_REF_NAME" dist/* --title "VPN Pripojenie ${GITHUB_REF_NAME#v}" --notes-file notes.md \
+            || gh release upload "$GITHUB_REF_NAME" dist/* --clobber
