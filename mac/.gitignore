@@ -1,0 +1,6 @@
+.build/
+dist/
+*.xcodeproj/
+.swiftpm/
+# skutočné firemné súbory nikdy do repozitára
+firma/

@@ -1,0 +1,60 @@
+#!/bin/bash
+# Firemná VPN – po inštalácii (beží ako root).
+# Firemné súbory sa berú z priečinka „firma“ vedľa .pkg (nie sú v balíku z GitHubu):
+#   firma/FiremnaVPN.ini   nastavenia správcu (len ak ešte nie sú na Macu)
+#   firma/profily/*.xml    XML profily Cisca
+#   firma/ca/*.crt|cer|pem certifikáty firemnej CA
+PKG="$1"
+FIRMA="$(dirname "$PKG")/firma"
+SUPPORT="/Library/Application Support/FiremnaVPN"
+LOG="/Library/Logs/FiremnaVPN-instalacia.log"
+exec >>"$LOG" 2>&1
+echo "=== $(date '+%Y-%m-%d %H:%M:%S') inštalácia z $PKG"
+mkdir -p "$SUPPORT/ca"
+chmod 755 "$SUPPORT"
+
+if [ -f "$FIRMA/FiremnaVPN.ini" ] && [ ! -f "$SUPPORT/FiremnaVPN.ini" ]; then
+  install -m 644 "$FIRMA/FiremnaVPN.ini" "$SUPPORT/FiremnaVPN.ini" && echo "nastavenia: FiremnaVPN.ini"
+fi
+
+PROFILE_DIR=/opt/cisco/secureclient/vpn/profile
+if [ ! -d /opt/cisco/secureclient ] && [ -d /opt/cisco/anyconnect ]; then PROFILE_DIR=/opt/cisco/anyconnect/profile; fi
+RESTART=0
+for f in "$FIRMA"/profily/*.xml; do
+  [ -f "$f" ] || continue
+  mkdir -p "$PROFILE_DIR"
+  install -m 644 "$f" "$PROFILE_DIR/" && echo "profil: $(basename "$f")" && RESTART=1
+done
+
+for f in "$FIRMA"/ca/*.crt "$FIRMA"/ca/*.cer "$FIRMA"/ca/*.pem; do
+  [ -f "$f" ] || continue
+  SUBJ=$(openssl x509 -noout -subject -in "$f" 2>/dev/null || openssl x509 -inform DER -noout -subject -in "$f" 2>/dev/null)
+  ISS=$(openssl x509 -noout -issuer -in "$f" 2>/dev/null || openssl x509 -inform DER -noout -issuer -in "$f" 2>/dev/null)
+  if [ -n "$SUBJ" ] && [ "${SUBJ#subject=}" = "${ISS#issuer=}" ]; then
+    security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "$f" && echo "koreňová CA: $(basename "$f")"
+  else
+    security add-certificates -k /Library/Keychains/System.keychain "$f" 2>/dev/null; echo "sprostredkujúca CA: $(basename "$f")"
+  fi
+  install -m 644 "$f" "$SUPPORT/ca/"
+done
+
+if [ "$RESTART" = 1 ]; then
+  for l in com.cisco.secureclient.vpn.service.agent com.cisco.secureclient.vpnagentd com.cisco.anyconnect.vpnagentd; do
+    launchctl kickstart -k "system/$l" 2>/dev/null && echo "reštart služby Cisca: $l" && break
+  done
+fi
+
+# Prihlásený používateľ: odstaviť okno Cisca a spustiť Firemnú VPN.
+USER_NOW=$(stat -f %Su /dev/console)
+if [ -n "$USER_NOW" ] && [ "$USER_NOW" != "root" ]; then
+  UID_NOW=$(id -u "$USER_NOW")
+  for l in com.cisco.secureclient.gui com.cisco.anyconnect.gui; do
+    launchctl bootout "gui/$UID_NOW/$l" 2>/dev/null
+    launchctl disable "gui/$UID_NOW/$l"
+  done
+  pkill -x "Cisco Secure Client" 2>/dev/null
+  launchctl enable "gui/$UID_NOW/org.xceratum.firemnavpn"
+  launchctl bootout "gui/$UID_NOW/org.xceratum.firemnavpn" 2>/dev/null
+  launchctl bootstrap "gui/$UID_NOW" /Library/LaunchAgents/org.xceratum.firemnavpn.plist && echo "spustené pre $USER_NOW"
+fi
+exit 0

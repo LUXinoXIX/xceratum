@@ -1,0 +1,4 @@
+#!/bin/bash
+# Pred inštaláciou ukončiť bežiacu Firemnú VPN (VPN pripojenie Cisca beží ďalej).
+pkill -x FiremnaVPN 2>/dev/null || true
+exit 0

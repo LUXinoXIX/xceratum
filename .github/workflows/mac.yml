@@ -1,0 +1,61 @@
+name: Mac
+
+on:
+  push:
+    paths: ["mac/**", ".github/workflows/mac.yml", "tests/fake_vpn.py"]
+    tags: ["mac-v*"]
+  pull_request:
+    paths: ["mac/**", ".github/workflows/mac.yml", "tests/fake_vpn.py"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  mac:
+    runs-on: macos-15
+    defaults:
+      run:
+        working-directory: mac
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verzia nástrojov
+        run: swift --version && sw_vers
+
+      - name: Testy
+        run: |
+          set -o pipefail
+          swift test 2>&1 | tee test.log
+
+      - name: Zostavenie .app a .pkg
+        run: |
+          set -o pipefail
+          ./packaging/build.sh 2>&1 | tee build.log
+
+      - name: Chyby prekladu ako upozornenia
+        if: failure()
+        run: |
+          grep -hE "(error|warning: unreachable|fatal):" test.log build.log 2>/dev/null | grep -v "^warning" | sort -u | head -60 | while IFS= read -r l; do
+            echo "::error::${l//$'\n'/ }"
+          done
+
+      - name: Kontrola balíka
+        run: |
+          pkgutil --payload-files dist/*.pkg | grep -q FiremnaVPN.app/Contents/MacOS/FiremnaVPN
+          lipo -archs dist/root/Applications/FiremnaVPN.app/Contents/MacOS/FiremnaVPN
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firemna-vpn-mac
+          path: |
+            mac/dist/*.pkg
+            mac/dist/*.zip
+
+      - name: Vydanie (Release) pri značke mac-v*
+        if: startsWith(github.ref, 'refs/tags/mac-v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.pkg dist/*.zip --title "Firemná VPN pre Mac ${GITHUB_REF_NAME#mac-v}" \
+            --notes "Inštalácia: stiahnite FiremnaVPN-*.zip, rozbaľte, do priečinka firma dajte XML profily a CA a spustite .pkg. Pri prvom spustení: Systémové nastavenia → Súkromie a bezpečnosť → Otvoriť aj tak."
