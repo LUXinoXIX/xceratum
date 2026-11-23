@@ -9,7 +9,7 @@ OUT=dist
 APP="$OUT/root/Applications/FiremnaVPN.app"
 
 rm -rf "$OUT"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$OUT/root/Library/LaunchAgents"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$OUT/root/Library/LaunchAgents" "$OUT/root/Library/PrivilegedHelperTools"
 
 echo "== Zostavujem (arm64 + x86_64)"
 if swift build -c release --arch arm64 --arch x86_64; then
@@ -22,6 +22,7 @@ fi
 cp "$BIN" "$APP/Contents/MacOS/FiremnaVPN"
 sed -e "s/__VERZIA__/$VERZIA/" -e "s/__BUILD__/$BUILD/" packaging/Info.plist > "$APP/Contents/Info.plist"
 cp packaging/org.xceratum.firemnavpn.plist "$OUT/root/Library/LaunchAgents/"
+install -m 755 packaging/firemnavpn-helper "$OUT/root/Library/PrivilegedHelperTools/firemnavpn-helper"
 lipo -info "$APP/Contents/MacOS/FiremnaVPN" || true
 
 echo "== Podpis (ad-hoc; Developer ID + notarizácia neskôr)"

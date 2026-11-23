@@ -44,6 +44,19 @@ if [ "$RESTART" = 1 ]; then
   done
 fi
 
+# Akcie správcu cez Touch ID: skupina admin smie spustiť len pomocníka Firemnej VPN bez hesla
+# (aplikácia pred tým vyžaduje Touch ID alebo heslo Macu).
+HELPER=/Library/PrivilegedHelperTools/firemnavpn-helper
+if [ -f "$HELPER" ]; then
+  chown root:wheel "$HELPER" && chmod 755 "$HELPER"
+  TMP=$(mktemp /tmp/firemnavpn-sudoers.XXXXXX)
+  echo "%admin ALL=(root) NOPASSWD: $HELPER" > "$TMP"
+  if visudo -cf "$TMP" >/dev/null; then
+    install -m 440 -o root -g wheel "$TMP" /etc/sudoers.d/firemnavpn && echo "pravidlo sudo: /etc/sudoers.d/firemnavpn"
+  fi
+  rm -f "$TMP"
+fi
+
 # Prihlásený používateľ: odstaviť okno Cisca a spustiť Firemnú VPN.
 USER_NOW=$(stat -f %Su /dev/console)
 if [ -n "$USER_NOW" ] && [ "$USER_NOW" != "root" ]; then

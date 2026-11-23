@@ -32,9 +32,7 @@ enum Shell {
     /// Text v jednoduchých úvodzovkách pre /bin/sh.
     static func q(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
 
-    /// Spustí príkaz s právami správcu. Overuje sa **len heslom správcu** (bez Touch ID):
-    /// meno a heslo zadá používateľ v okne aplikácie, príkaz beží cez AppleScript v procese
-    /// (heslo sa neobjaví v zozname procesov). Overenie platí, kým sa nastavenia nezamknú (max. 5 min).
+    /// Záloha bez pomocníka: príkaz s právami správcu po zadaní mena a hesla správcu (pozri `Admin`).
     @MainActor
     static func admin(_ command: String, prompt: String) -> Result {
         if AdminAuth.valid == nil {
@@ -49,7 +47,7 @@ enum Shell {
     static func cancelled(_ r: Result) -> Bool { r.out.contains("-128") || r.out.lowercased().contains("user canceled") }
 }
 
-// MARK: - overenie správcu len heslom
+// MARK: - overenie správcu: Touch ID, záloha meno a heslo správcu
 
 @MainActor
 enum AdminAuth {
@@ -117,6 +115,64 @@ enum AdminAuth {
             }
             message = "Meno alebo heslo správcu nesedí. Skúste znova."
         }
+    }
+}
+
+/// Akcie správcu. Hlavná cesta: Touch ID (alebo heslo Macu) a potom `sudo -n` na úzky pomocník,
+/// ktorý nainštaloval balík (pravidlo v /etc/sudoers.d/firemnavpn pre skupinu admin).
+/// Ak pomocník nie je (alebo používateľ nie je správca), aplikácia si vypýta meno a heslo správcu.
+@MainActor
+enum Admin {
+    static let helper = "/Library/PrivilegedHelperTools/firemnavpn-helper"
+    private static var until: Date?
+    static let validFor: TimeInterval = 5 * 60
+
+    static var unlocked: Bool { (until ?? .distantPast) > Date() }
+
+    static func helperReady() -> Bool {
+        FileManager.default.isExecutableFile(atPath: helper)
+            && Shell.run("/usr/bin/sudo", ["-n", helper, "test"]).code == 0
+    }
+
+    static func lock() {
+        until = nil
+        AdminAuth.clear()
+    }
+
+    /// Odomknutie: Touch ID; bez pomocníka meno a heslo správcu.
+    static func unlock(_ reason: String) async -> Bool {
+        if unlocked { return true }
+        if helperReady() {
+            let ctx = LAContext()
+            ctx.localizedFallbackTitle = "Zadať heslo"
+            var err: NSError?
+            if ctx.canEvaluatePolicy(.deviceOwnerAuthentication, error: &err),
+               (try? await ctx.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason)) == true {
+                until = Date().addingTimeInterval(validFor)
+                return true
+            }
+            return false
+        }
+        AdminAuth.clear()
+        if AdminAuth.ask("Firemná VPN chce \(reason).") {
+            until = Date().addingTimeInterval(validFor)
+            return true
+        }
+        return false
+    }
+
+    /// Akcia cez pomocníka; `fallback` je ten istý krok ako príkaz pre shell (cesta bez pomocníka).
+    static func perform(_ action: [String], fallback: String, reason: String) async -> Shell.Result {
+        guard await unlock(reason) else { return Shell.Result(code: -128, out: "User canceled.") }
+        if helperReady() {
+            return Shell.run("/usr/bin/sudo", ["-n", helper] + action)
+        }
+        return Shell.admin(fallback, prompt: "Firemná VPN chce \(reason).")
+    }
+
+    static func restartCisco() async -> Shell.Result {
+        let labels = CiscoSystem.serviceLabels.map { "launchctl kickstart -k system/\($0) 2>/dev/null" }.joined(separator: " || ")
+        return await perform(["restart-cisco"], fallback: "(\(labels)) || true", reason: "reštartovať službu Cisca")
     }
 }
 
@@ -332,12 +388,6 @@ enum CiscoSystem {
 
     static func serviceLabel() -> String? {
         serviceLabels.first { Shell.run("/bin/launchctl", ["print", "system/\($0)"]).code == 0 }
-    }
-
-    @MainActor
-    static func restartService() -> Shell.Result {
-        let labels = serviceLabels.map { "launchctl kickstart -k system/\($0) 2>/dev/null" }.joined(separator: " || ")
-        return Shell.admin("(\(labels)) || true", prompt: "Firemná VPN chce reštartovať službu Cisca.")
     }
 
     /// Je okno Cisca vypnuté pre tohto používateľa?

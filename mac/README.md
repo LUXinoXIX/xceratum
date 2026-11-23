@@ -11,7 +11,11 @@ Intel aj Apple čip.
 - **Výmena osobného certifikátu**: keď sa blíži koniec platnosti, okno, lišta aj Centrum hlásení upozornia.
   Používateľ klikne *Vymeniť certifikát…* (alebo pretiahne `.p12` do okna), zadá heslo k súboru a aplikácia
   certifikát vloží do prihlasovacej kľúčenky, povolí ho Ciscu a po úspechu zmaže starý.
-- **Zámok macOS** v nastaveniach správcu namiesto UAC.
+- **Touch ID všade**: pri hesle k VPN z Kľúčenky aj pri odomknutí nastavení správcu (zámok namiesto UAC).
+  Akcie správcu robí úzky pomocník `/Library/PrivilegedHelperTools/firemnavpn-helper` (uloženie nastavení,
+  pridanie/odstránenie XML profilu, reštart služby Cisca); balík pridá pravidlo `/etc/sudoers.d/firemnavpn`,
+  aby ho správcovia Macu mohli spustiť po overení Touch ID bez hesla. Používateľ, ktorý nie je správca,
+  zadá meno a heslo správcu.
 
 ## Inštalácia (z GitHubu, bez kompilovania)
 
@@ -40,6 +44,7 @@ swift test                    # testy (simulácia Cisca: ../tests/fake_vpn.py)
 | Čo | Kde |
 |---|---|
 | Aplikácia | `/Applications/FiremnaVPN.app` |
+| Pomocník pre správcu | `/Library/PrivilegedHelperTools/firemnavpn-helper` + `/etc/sudoers.d/firemnavpn` |
 | Spúšťanie po prihlásení | `/Library/LaunchAgents/org.xceratum.firemnavpn.plist` |
 | Nastavenia správcu | `/Library/Application Support/FiremnaVPN/FiremnaVPN.ini` (rovnaký formát ako Windows) |
 | Stav používateľa | `~/Library/Application Support/FiremnaVPN/pouzivatel.json` (bez hesla) |

@@ -1,0 +1,72 @@
+#!/bin/bash
+# Firemná VPN – pomocník pre akcie správcu (beží ako root cez sudo).
+# Aplikácia ho volá až po overení cez Touch ID (alebo heslo Macu).
+# Pravidlo v /etc/sudoers.d/firemnavpn dovoľuje skupine admin spustiť len tento súbor.
+# Akcie sú úzke a vstupy sa kontrolujú – nespúšťa ľubovoľné príkazy.
+set -u
+export PATH=/usr/bin:/bin:/usr/sbin:/sbin
+SUPPORT="/Library/Application Support/FiremnaVPN"
+MAX=1048576
+
+profile_dir() {
+  if [ ! -d /opt/cisco/secureclient ] && [ -d /opt/cisco/anyconnect ]; then
+    echo /opt/cisco/anyconnect/profile
+  else
+    echo /opt/cisco/secureclient/vpn/profile
+  fi
+}
+
+check_file() {   # bežný súbor, nie odkaz, rozumná veľkosť
+  local f="$1"
+  [ -f "$f" ] && [ ! -L "$f" ] || { echo "súbor neexistuje: $f" >&2; exit 2; }
+  local size
+  size=$(stat -f %z "$f")
+  [ "$size" -le "$MAX" ] || { echo "súbor je príliš veľký: $f" >&2; exit 2; }
+}
+
+restart_cisco() {
+  for l in com.cisco.secureclient.vpn.service.agent com.cisco.secureclient.vpnagentd com.cisco.anyconnect.vpnagentd; do
+    launchctl kickstart -k "system/$l" 2>/dev/null && { echo "reštart: $l"; return 0; }
+  done
+  echo "služba Cisca sa nenašla" >&2
+  return 1
+}
+
+cmd="${1:-}"
+shift || true
+case "$cmd" in
+  test)
+    exit 0
+    ;;
+  ini)
+    check_file "$1"
+    mkdir -p "$SUPPORT" && chmod 755 "$SUPPORT"
+    install -m 644 -o root -g wheel "$1" "$SUPPORT/FiremnaVPN.ini"
+    ;;
+  profil-pridaj)
+    dir=$(profile_dir)
+    mkdir -p "$dir"
+    for f in "$@"; do
+      check_file "$f"
+      case "$f" in *.xml|*.XML) ;; *) echo "nie je .xml: $f" >&2; exit 2;; esac
+      grep -q "AnyConnectProfile" "$f" || { echo "nie je profil Cisco: $f" >&2; exit 2; }
+      install -m 644 -o root -g wheel "$f" "$dir/$(basename "$f")"
+      echo "profil: $(basename "$f")"
+    done
+    restart_cisco || true
+    ;;
+  profil-odstran)
+    dir=$(profile_dir)
+    name=$(basename "${1:-}")
+    case "$name" in *.xml|*.XML) ;; *) echo "nie je .xml: $name" >&2; exit 2;; esac
+    rm -f "$dir/$name"
+    restart_cisco || true
+    ;;
+  restart-cisco)
+    restart_cisco
+    ;;
+  *)
+    echo "použitie: firemnavpn-helper test|ini SÚBOR|profil-pridaj SÚBOR…|profil-odstran NÁZOV|restart-cisco" >&2
+    exit 64
+    ;;
+esac

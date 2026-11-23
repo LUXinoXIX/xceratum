@@ -68,7 +68,7 @@ struct SettingsView: View {
         }
         .frame(width: 1060, height: 620)
         .onAppear { load() }
-        .onDisappear { unlocked = false; AdminAuth.clear() }
+        .onDisappear { unlocked = false; Admin.lock() }
     }
 
     // MARK: Pripojenia
@@ -207,9 +207,11 @@ struct SettingsView: View {
                 Button("Odstrániť") { removeXML() }.disabled(xmlShown == nil)
                 Spacer()
                 Button("Reštartovať službu Cisca") {
-                    let r = CiscoSystem.restartService()
-                    status = r.code == 0 ? "Služba Cisca bola reštartovaná." : (Shell.cancelled(r) ? "" : "Reštart sa nepodaril: \(r.out)")
-                    m.refreshProfiles()
+                    Task {
+                        let r = await Admin.restartCisco()
+                        status = r.code == 0 ? "Služba Cisca bola reštartovaná." : (Shell.cancelled(r) ? "" : "Reštart sa nepodaril: \(r.out)")
+                        m.refreshProfiles()
+                    }
                 }
             }
             if let f = xmlShown, let d = FileManager.default.contents(atPath: f.path) {
@@ -242,10 +244,13 @@ struct SettingsView: View {
             cmds.append("install -m 644 \(Shell.q(u.path)) \(Shell.q(dir + "/"))")
         }
         let labels = CiscoSystem.serviceLabels.map { "launchctl kickstart -k system/\($0) 2>/dev/null" }.joined(separator: " || ")
-        let r = Shell.admin("mkdir -p \(Shell.q(dir)) && " + cmds.joined(separator: " && ") + " && ((\(labels)) || true)",
-                            prompt: "Firemná VPN chce pridať XML profil Cisca.")
-        status = r.code == 0 ? "Profil je pridaný, služba Cisca reštartovaná." : (Shell.cancelled(r) ? "" : r.out)
-        m.refreshProfiles()
+        let fallback = "mkdir -p \(Shell.q(dir)) && " + cmds.joined(separator: " && ") + " && ((\(labels)) || true)"
+        let paths = p.urls.map(\.path)
+        Task {
+            let r = await Admin.perform(["profil-pridaj"] + paths, fallback: fallback, reason: "pridať XML profil Cisca")
+            status = r.code == 0 ? "Profil je pridaný, služba Cisca reštartovaná." : (Shell.cancelled(r) ? "" : r.out)
+            m.refreshProfiles()
+        }
     }
 
     func removeXML() {
@@ -256,10 +261,13 @@ struct SettingsView: View {
         a.addButton(withTitle: "Odstrániť")
         a.addButton(withTitle: "Zrušiť")
         guard a.runModal() == .alertFirstButtonReturn else { return }
-        let r = Shell.admin("rm -f \(Shell.q(f.path))", prompt: "Firemná VPN chce odstrániť XML profil Cisca.")
-        status = r.code == 0 ? "Profil je odstránený." : (Shell.cancelled(r) ? "" : r.out)
-        xmlShown = nil
-        m.refreshProfiles()
+        Task {
+            let r = await Admin.perform(["profil-odstran", f.name], fallback: "rm -f \(Shell.q(f.path))",
+                                        reason: "odstrániť XML profil Cisca")
+            status = r.code == 0 ? "Profil je odstránený." : (Shell.cancelled(r) ? "" : r.out)
+            xmlShown = nil
+            m.refreshProfiles()
+        }
     }
 
     // MARK: Certifikáty
@@ -392,11 +400,12 @@ struct SettingsView: View {
     }
 
     func toggleLock() {
-        if unlocked { unlocked = false; AdminAuth.clear(); return }
-        AdminAuth.clear()   // vždy nové overenie heslom
-        let r = Shell.admin("/usr/bin/true", prompt: "Firemná VPN chce odomknúť nastavenia pripojení.")
-        unlocked = r.code == 0
-        status = r.code == 0 || Shell.cancelled(r) ? "" : r.out
+        if unlocked { unlocked = false; Admin.lock(); return }
+        Admin.lock()   // vždy nové overenie (Touch ID)
+        Task {
+            unlocked = await Admin.unlock("odomknúť nastavenia pripojení")
+            status = ""
+        }
     }
 
     func save() {
@@ -411,19 +420,21 @@ struct SettingsView: View {
             return
         }
         let dir = (AdminConfig.systemPath as NSString).deletingLastPathComponent
-        let r = Shell.admin("mkdir -p \(Shell.q(dir)) && install -m 644 \(Shell.q(tmp.path)) \(Shell.q(AdminConfig.systemPath))",
-                            prompt: "Firemná VPN chce uložiť nastavenia pre všetkých používateľov.")
-        try? FileManager.default.removeItem(at: tmp)
-        if r.code == 0 {
-            m.reloadConfig()
-            m.refreshProfiles()
-            m.applyAppearance()
-            m.checkCerts(notify: false)
-            unlocked = false
-            AdminAuth.clear()
-            status = "Nastavenia sú uložené. Platia pre všetkých používateľov tohto Macu."
-        } else if !Shell.cancelled(r) {
-            status = "Uloženie sa nepodarilo: \(r.out)"
+        let fallback = "mkdir -p \(Shell.q(dir)) && install -m 644 \(Shell.q(tmp.path)) \(Shell.q(AdminConfig.systemPath))"
+        Task {
+            let r = await Admin.perform(["ini", tmp.path], fallback: fallback, reason: "uložiť nastavenia pre všetkých používateľov")
+            try? FileManager.default.removeItem(at: tmp)
+            if r.code == 0 {
+                m.reloadConfig()
+                m.refreshProfiles()
+                m.applyAppearance()
+                m.checkCerts(notify: false)
+                unlocked = false
+                Admin.lock()
+                status = "Nastavenia sú uložené. Platia pre všetkých používateľov tohto Macu."
+            } else if !Shell.cancelled(r) {
+                status = "Uloženie sa nepodarilo: \(r.out)"
+            }
         }
     }
 }
