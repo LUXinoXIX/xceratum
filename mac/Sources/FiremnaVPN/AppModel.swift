@@ -229,7 +229,8 @@ final class AppModel: ObservableObject {
         }
 
         let cred = CiscoCLI.Credentials(user: prof.auth.needsUser || !userName.isEmpty ? userName : "",
-                                        password: prof.auth.needsPassword ? pw : "",
+                                        // heslo a 2FA kód spolu, ako v okne Cisca
+                                        password: prof.auth.needsPassword ? pw + (prof.auth.needsCode ? code : "") : "",
                                         second: prof.auth.needsSecond ? second : "")
         screen = .connecting
         step = 0

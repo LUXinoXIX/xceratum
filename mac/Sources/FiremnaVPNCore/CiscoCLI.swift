@@ -174,6 +174,7 @@ public final class CiscoCLI: @unchecked Sendable {
                         cancelled: () -> Bool = { false },
                         autoBanner: Bool = false) -> Outcome {
         guard let path else { return Outcome(.failed, "Nenašiel sa Cisco Secure Client (príkaz vpn).") }
+        if state() == "Connected" { return Outcome(.connected) }
         let killed = closeCiscoUI()
         if !killed.isEmpty { output("Ukončené: " + killed.joined(separator: ", ") + "\n") }
 
@@ -206,10 +207,21 @@ public final class CiscoCLI: @unchecked Sendable {
         }
         func markHandled() { handledCount = buf.count }
 
+        // počkať na úvodný výpis Cisca (napr. „state: Connected“ z minulosti nesmie znamenať úspech)
+        let greetEnd = Date().addingTimeInterval(3)
+        var idleSince = Date()
+        while Date() < greetEnd {
+            guard let c = io.read(timeout: 0.1) else { eof = true; break }
+            if !c.isEmpty { buf += c; idleSince = Date() }
+            if buf.contains("VPN>") && Date().timeIntervalSince(idleSince) > 0.4 { break }
+        }
+        output(buf)
+        markHandled()
+
         let cmd = "connect " + CiscoParse.quoteHost(prof.hostName)
         send(cmd, cmd)
 
-        defer {
+        func cleanup() {
             if io.isRunning {
                 if result == .connected {
                     io.write("exit\n")
@@ -343,16 +355,17 @@ public final class CiscoCLI: @unchecked Sendable {
             }
         }
 
+        cleanup()
         let finalResult = result
         let finalBuf = buf
         switch finalResult {
         case .cancelled?, .needUser?:
-            if state() == "Connected" { return Outcome(.connected) }
+            if waitConnected(tries: 1) { return Outcome(.connected) }
             return Outcome(finalResult!, error, original)
         case .declined?:
             return Outcome(.declined, error, original)
         case .connected?, nil:
-            if state() == "Connected" { return Outcome(.connected) }
+            if waitConnected(tries: finalResult == .connected ? 5 : 1) { return Outcome(.connected) }
             if finalResult == nil {
                 let err = CiscoParse.lastErrorLine(finalBuf).isEmpty ? CiscoParse.lastLine(finalBuf) : CiscoParse.lastErrorLine(finalBuf)
                 let (sk, orig) = Messages.friendly(err)
@@ -368,6 +381,15 @@ public final class CiscoCLI: @unchecked Sendable {
         case .failed?:
             return Outcome(.failed, error, original)
         }
+    }
+
+    /// Stav po ukončení relácie; služba Cisca ho niekedy hlási s oneskorením.
+    func waitConnected(tries: Int) -> Bool {
+        for i in 0..<max(tries, 1) {
+            if state() == "Connected" { return true }
+            if i < tries - 1 { Thread.sleep(forTimeInterval: 1) }
+        }
+        return false
     }
 
     func friendly(_ output: String, _ prof: VpnProfile) -> (String, String) {
