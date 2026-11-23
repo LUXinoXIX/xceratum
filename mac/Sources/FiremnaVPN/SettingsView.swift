@@ -68,6 +68,7 @@ struct SettingsView: View {
         }
         .frame(width: 1060, height: 620)
         .onAppear { load() }
+        .onDisappear { unlocked = false; AdminAuth.clear() }
     }
 
     // MARK: Pripojenia
@@ -391,7 +392,8 @@ struct SettingsView: View {
     }
 
     func toggleLock() {
-        if unlocked { unlocked = false; return }
+        if unlocked { unlocked = false; AdminAuth.clear(); return }
+        AdminAuth.clear()   // vždy nové overenie heslom
         let r = Shell.admin("/usr/bin/true", prompt: "Firemná VPN chce odomknúť nastavenia pripojení.")
         unlocked = r.code == 0
         status = r.code == 0 || Shell.cancelled(r) ? "" : r.out
@@ -418,6 +420,7 @@ struct SettingsView: View {
             m.applyAppearance()
             m.checkCerts(notify: false)
             unlocked = false
+            AdminAuth.clear()
             status = "Nastavenia sú uložené. Platia pre všetkých používateľov tohto Macu."
         } else if !Shell.cancelled(r) {
             status = "Uloženie sa nepodarilo: \(r.out)"

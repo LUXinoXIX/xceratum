@@ -32,16 +32,92 @@ enum Shell {
     /// Text v jednoduchých úvodzovkách pre /bin/sh.
     static func q(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
 
-    /// Spustí príkaz s právami správcu – macOS sa opýta heslo správcu (overenie platí niekoľko minút).
+    /// Spustí príkaz s právami správcu. Overuje sa **len heslom správcu** (bez Touch ID):
+    /// meno a heslo zadá používateľ v okne aplikácie, príkaz beží cez AppleScript v procese
+    /// (heslo sa neobjaví v zozname procesov). Overenie platí, kým sa nastavenia nezamknú (max. 5 min).
+    @MainActor
     static func admin(_ command: String, prompt: String) -> Result {
-        func asq(_ s: String) -> String {
-            "\"" + s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
+        if AdminAuth.valid == nil {
+            guard AdminAuth.ask(prompt) else { return Result(code: -128, out: "User canceled.") }
         }
-        let script = "do shell script \(asq(command)) with prompt \(asq(prompt)) with administrator privileges"
-        return run("/usr/bin/osascript", ["-e", script])
+        guard let c = AdminAuth.valid else { return Result(code: -128, out: "User canceled.") }
+        let r = AdminAuth.run(command, user: c.user, password: c.password)
+        if r.code != 0 && AdminAuth.isAuthError(r) { AdminAuth.clear() }
+        return r
     }
 
     static func cancelled(_ r: Result) -> Bool { r.out.contains("-128") || r.out.lowercased().contains("user canceled") }
+}
+
+// MARK: - overenie správcu len heslom
+
+@MainActor
+enum AdminAuth {
+    struct Creds { var user: String; var password: String; var at: Date }
+    private static var creds: Creds?
+    static let validFor: TimeInterval = 5 * 60
+
+    static var valid: Creds? {
+        guard let c = creds, Date().timeIntervalSince(c.at) < validFor else { creds = nil; return nil }
+        return c
+    }
+
+    static func clear() { creds = nil }
+
+    static func asq(_ s: String) -> String {
+        "\"" + s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
+    }
+
+    static func run(_ command: String, user: String, password: String) -> Shell.Result {
+        let src = "do shell script \(asq(command)) user name \(asq(user)) password \(asq(password)) with administrator privileges"
+        var err: NSDictionary?
+        let out = NSAppleScript(source: src)?.executeAndReturnError(&err)
+        if let err {
+            let n = (err[NSAppleScript.errorNumber] as? Int) ?? -1
+            let msg = (err[NSAppleScript.errorMessage] as? String) ?? "chyba \(n)"
+            return Shell.Result(code: Int32(truncatingIfNeeded: n), out: msg)
+        }
+        return Shell.Result(code: 0, out: out?.stringValue ?? "")
+    }
+
+    static func isAuthError(_ r: Shell.Result) -> Bool {
+        let l = r.out.lowercased()
+        return r.code == -60005 || r.code == -60007 || l.contains("password") || l.contains("heslo")
+    }
+
+    /// Okno „meno a heslo správcu“. Overí heslo hneď (`true`); pri zlom hesle sa pýta znova.
+    static func ask(_ prompt: String) -> Bool {
+        var message = prompt
+        while true {
+            let a = NSAlert()
+            a.messageText = message
+            a.informativeText = "Zadajte meno a heslo správcu tohto Macu."
+            a.addButton(withTitle: "Odomknúť")
+            a.addButton(withTitle: "Zrušiť")
+            let user = NSTextField(string: NSUserName())
+            user.placeholderString = "Meno správcu"
+            let pass = NSSecureTextField(string: "")
+            pass.placeholderString = "Heslo"
+            for f in [user, pass] as [NSTextField] {
+                f.translatesAutoresizingMaskIntoConstraints = false
+                f.widthAnchor.constraint(equalToConstant: 260).isActive = true
+            }
+            let stack = NSStackView(views: [user, pass])
+            stack.orientation = .vertical
+            stack.spacing = 8
+            stack.frame = NSRect(x: 0, y: 0, width: 260, height: 56)
+            a.accessoryView = stack
+            a.window.initialFirstResponder = pass
+            NSApp.activate(ignoringOtherApps: true)
+            guard a.runModal() == .alertFirstButtonReturn else { return false }
+            let r = run("/usr/bin/true", user: user.stringValue, password: pass.stringValue)
+            if r.code == 0 {
+                creds = Creds(user: user.stringValue, password: pass.stringValue, at: Date())
+                return true
+            }
+            message = "Meno alebo heslo správcu nesedí. Skúste znova."
+        }
+    }
 }
 
 // MARK: - heslo v Kľúčenke + Touch ID
@@ -258,6 +334,7 @@ enum CiscoSystem {
         serviceLabels.first { Shell.run("/bin/launchctl", ["print", "system/\($0)"]).code == 0 }
     }
 
+    @MainActor
     static func restartService() -> Shell.Result {
         let labels = serviceLabels.map { "launchctl kickstart -k system/\($0) 2>/dev/null" }.joined(separator: " || ")
         return Shell.admin("(\(labels)) || true", prompt: "Firemná VPN chce reštartovať službu Cisca.")
