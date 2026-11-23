@@ -49,6 +49,29 @@ final class ConfigTests: XCTestCase {
     }
 }
 
+final class CloneTests: XCTestCase {
+    func testAuthSplitAndClone() {
+        for m in AuthMode.allCases {
+            XCTAssertEqual(AuthMode.join(m.base, twoFA: m.has2FA), m)
+        }
+        XCTAssertEqual(AuthMode.join(.menoHeslo, twoFA: false), .menoHeslo)
+        XCTAssertEqual(AuthMode.join(.certifikat, twoFA: true), .certifikat)
+        XCTAssertFalse(AuthMode.Base.certifikat.allows2FA)
+        XCTAssertEqual(AuthMode.uniqueName("Firma A", existing: ["Firma A"]), "Firma A (2)")
+        XCTAssertEqual(AuthMode.uniqueName("Firma A (2)", existing: ["Firma A", "Firma A (2)", "Firma A (3)"]), "Firma A (4)")
+
+        // dva riadky nad tým istým pripojením Cisca: s 2FA a bez neho
+        var cfg = AdminConfig()
+        cfg.polozky = [ItemSettings(cisco: "Firma A", nazov: "Firma A", auth: "MenoHesloKod"),
+                       ItemSettings(cisco: "Firma A", nazov: "Firma A bez 2FA", auth: "MenoHeslo")]
+        let items = Profiles.buildItems(cfg: cfg, hosts: [CiscoHost(hostName: "Firma A")])
+        XCTAssertEqual(items.map(\.name), ["Firma A", "Firma A bez 2FA"])
+        XCTAssertEqual(items.map(\.auth), [.menoHesloKod, .menoHeslo])
+        XCTAssertNotEqual(items[0].id, items[1].id)
+        XCTAssertEqual(AdminConfig.parse(ini: cfg.toIni()).polozky, cfg.polozky)
+    }
+}
+
 final class ProfileTests: XCTestCase {
     let xml = """
     <?xml version="1.0" encoding="UTF-8"?>

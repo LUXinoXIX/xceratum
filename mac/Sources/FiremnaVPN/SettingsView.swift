@@ -10,20 +10,22 @@ struct SettingsView: View {
     @State private var unlocked = false
     @State private var cfg = AdminConfig()
     @State private var items: [ItemRow] = []
-    @State private var sel: Int?
+    @State private var selRow: UUID?
     @State private var xmlShown: ProfileFile?
     @State private var status = ""
     @State private var newIssuer = ""
 
     struct ItemRow: Identifiable, Equatable {
-        var id: String { cisco }
+        var id = UUID()
         var cisco: String
         var name: String
-        var server: String
-        var auth: AuthMode
+        var base: AuthMode.Base
+        var twoFA: Bool
+        var user: String
         var show: Bool
         var isDefault: Bool
-        var user: String
+        var state: String          // nastavené | nové – skontrolujte | nový klon – uložte | zmenené – uložte | chýba v Cisco
+        var auth: AuthMode { AuthMode.join(base, twoFA: twoFA) }
     }
 
     var body: some View {
@@ -64,52 +66,126 @@ struct SettingsView: View {
             .padding(.horizontal, 20)
             .frame(height: 60)
         }
-        .frame(width: 900, height: 600)
+        .frame(width: 1060, height: 620)
         .onAppear { load() }
     }
 
     // MARK: Pripojenia
 
+    var ciscoHosts: [String] {
+        var h = m.profileFiles.flatMap(\.hosts).map(\.hostName)
+        for i in items where !h.contains(i.cisco) { h.append(i.cisco) }
+        return h
+    }
+
     var connections: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Ktoré pripojenia vidí používateľ, v akom poradí a ako sa prihlasuje. Pripojenia sa čítajú z XML profilov Cisca.")
+            Text("Každý riadok je jedna voľba v roletke aplikácie. Pri každom nastavte spôsob prihlásenia a či sa pridáva kód z aplikácie Authenticator (2FA). „Klonovať“ vytvorí ďalšiu voľbu nad tým istým pripojením – napr. bez 2FA alebo pre iné meno.")
                 .foregroundStyle(.secondary)
-            Table(items, selection: Binding(get: { sel.map { items[safe: $0]?.id } ?? nil },
-                                            set: { id in sel = items.firstIndex { $0.id == id } })) {
-                TableColumn("Zobraziť") { r in
-                    Toggle("", isOn: bind(r, \.show)).labelsHidden().toggleStyle(.checkbox)
-                }.width(60)
-                TableColumn("Názov") { r in TextField("", text: bind(r, \.name)) }
-                TableColumn("Cisco (HostName)") { r in Text(r.cisco).font(.system(.body, design: .monospaced)) }
-                TableColumn("Prihlásenie") { r in
-                    Picker("", selection: bind(r, \.auth)) {
-                        ForEach(AuthMode.allCases, id: \.self) { Text($0.label).tag($0) }
-                    }.labelsHidden()
-                }
+                .fixedSize(horizontal: false, vertical: true)
+            Table(items, selection: $selRow) {
                 TableColumn("Predvolené") { r in
                     Toggle("", isOn: Binding(get: { r.isDefault }, set: { on in
                         for i in items.indices { items[i].isDefault = on && items[i].id == r.id }
+                        mark(r.id)
                     })).labelsHidden().toggleStyle(.checkbox)
-                }.width(80)
+                }.width(70)
+                TableColumn("Názov v aplikácii") { r in TextField("", text: bind(r, \.name)) }
+                    .width(min: 140, ideal: 170)
+                TableColumn("Pripojenie v Cisco") { r in
+                    Picker("", selection: bind(r, \.cisco)) {
+                        ForEach(ciscoHosts, id: \.self) { Text($0).tag($0) }
+                    }.labelsHidden()
+                }.width(min: 140, ideal: 170)
+                TableColumn("Prihlásenie") { r in
+                    Picker("", selection: Binding(get: { r.base }, set: { b in
+                        update(r.id) { $0.base = b; if !b.allows2FA { $0.twoFA = false } }
+                    })) {
+                        ForEach(AuthMode.Base.allCases, id: \.self) { Text($0.label).tag($0) }
+                    }.labelsHidden()
+                }.width(min: 130, ideal: 150)
+                TableColumn("2FA kód") { r in
+                    Toggle("", isOn: bind(r, \.twoFA)).labelsHidden().toggleStyle(.checkbox)
+                        .disabled(!r.base.allows2FA)
+                        .help("Zaškrtnite, ak sa k heslu pridáva 6-miestny kód z aplikácie Authenticator.")
+                }.width(56)
+                TableColumn("Meno (voliteľné)") { r in
+                    TextField("", text: bind(r, \.user)).help("Predvyplní sa v okne, používateľ ho môže prepísať.")
+                }.width(min: 90, ideal: 120)
+                TableColumn("Zobraziť") { r in
+                    Toggle("", isOn: bind(r, \.show)).labelsHidden().toggleStyle(.checkbox)
+                }.width(56)
+                TableColumn("Stav") { r in
+                    Text(r.state).foregroundStyle(stateColor(r.state))
+                }.width(min: 110, ideal: 140)
             }
             HStack {
-                Button("▲ Vyššie") { move(-1) }.disabled(sel == nil || sel == 0)
-                Button("▼ Nižšie") { move(1) }.disabled(sel == nil || sel == items.count - 1)
+                Button("Klonovať riadok") { cloneRow() }.disabled(selIndex == nil)
+                Button("Odstrániť") { deleteRow() }.disabled(!canDelete)
+                    .help("Posledná voľba pripojenia z Cisca sa dá len skryť (Zobraziť).")
+                Button("▲ Hore") { move(-1) }.disabled(selIndex == nil || selIndex == 0)
+                Button("▼ Dole") { move(1) }.disabled(selIndex == nil || selIndex == items.count - 1)
                 Spacer()
                 Button("Načítať znova z Cisca") { m.refreshProfiles(); DispatchQueue.main.asyncAfter(deadline: .now() + 2) { load() } }
             }
         }
     }
 
+    var selIndex: Int? { items.firstIndex { $0.id == selRow } }
+
+    var canDelete: Bool {
+        guard let i = selIndex else { return false }
+        if items[i].state == "chýba v Cisco" { return true }
+        return items.filter { $0.cisco.lowercased() == items[i].cisco.lowercased() }.count > 1
+    }
+
+    func stateColor(_ s: String) -> Color {
+        switch s {
+        case "nastavené": return Color(hex: 0x0E7A0D)
+        case "chýba v Cisco": return .secondary
+        case "nové – skontrolujte": return Color(hex: 0xB86E00)
+        default: return .accentColor
+        }
+    }
+
+    func mark(_ id: UUID) {
+        guard let i = items.firstIndex(where: { $0.id == id }) else { return }
+        if items[i].state == "nastavené" || items[i].state == "nové – skontrolujte" { items[i].state = "zmenené – uložte" }
+    }
+
+    func update(_ id: UUID, _ f: (inout ItemRow) -> Void) {
+        guard let i = items.firstIndex(where: { $0.id == id }) else { return }
+        f(&items[i])
+        mark(id)
+    }
+
     func bind<T>(_ r: ItemRow, _ kp: WritableKeyPath<ItemRow, T>) -> Binding<T> {
         Binding(get: { items.first { $0.id == r.id }?[keyPath: kp] ?? r[keyPath: kp] },
-                set: { v in if let i = items.firstIndex(where: { $0.id == r.id }) { items[i][keyPath: kp] = v } })
+                set: { v in update(r.id) { $0[keyPath: kp] = v } })
+    }
+
+    func cloneRow() {
+        guard let i = selIndex else { return }
+        var c = items[i]
+        c.id = UUID()
+        c.name = AuthMode.uniqueName(c.name, existing: items.map(\.name))
+        c.isDefault = false
+        c.show = true
+        c.state = "nový klon – uložte"
+        items.insert(c, at: i + 1)
+        selRow = c.id
+    }
+
+    func deleteRow() {
+        guard let i = selIndex, canDelete else { return }
+        items.remove(at: i)
+        selRow = items.indices.contains(i) ? items[i].id : items.last?.id
     }
 
     func move(_ d: Int) {
-        guard let i = sel, i + d >= 0, i + d < items.count else { return }
+        guard let i = selIndex, i + d >= 0, i + d < items.count else { return }
         items.swapAt(i, i + d)
-        sel = i + d
+        mark(items[i + d].id)
     }
 
     // MARK: Profily
@@ -305,9 +381,12 @@ struct SettingsView: View {
 
     func load() {
         cfg = m.cfg
+        let known = Set(m.profileFiles.flatMap(\.hosts).map { $0.hostName.lowercased() })
         items = m.allItems.map {
-            ItemRow(cisco: $0.hostName, name: $0.name, server: $0.server, auth: $0.auth,
-                    show: !$0.hidden, isDefault: $0.isDefault, user: $0.presetUser)
+            ItemRow(cisco: $0.hostName, name: $0.name, base: $0.auth.base, twoFA: $0.auth.has2FA,
+                    user: $0.presetUser, show: !$0.hidden, isDefault: $0.isDefault,
+                    state: !known.isEmpty && !known.contains($0.hostName.lowercased()) ? "chýba v Cisco"
+                        : ($0.configured ? "nastavené" : "nové – skontrolujte"))
         }
     }
 

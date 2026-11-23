@@ -25,6 +25,55 @@ public enum AuthMode: String, CaseIterable, Codable, Sendable {
         }
     }
 
+    /// Základ prihlásenia bez 2FA – ako stĺpec „Prihlásenie“ vo Windows a Linux nastaveniach.
+    public enum Base: Int, CaseIterable, Sendable {
+        case menoHeslo, heslo, certifikat, dveHesla
+        public var label: String {
+            switch self {
+            case .menoHeslo: return "Meno a heslo"
+            case .heslo: return "Len heslo"
+            case .certifikat: return "Osobný certifikát"
+            case .dveHesla: return "Meno a dve heslá"
+            }
+        }
+        /// 2FA kód sa dá pridať len k prihláseniu heslom.
+        public var allows2FA: Bool { self == .menoHeslo || self == .heslo }
+    }
+
+    public var base: Base {
+        switch self {
+        case .menoHesloKod, .menoHeslo: return .menoHeslo
+        case .hesloKod, .heslo: return .heslo
+        case .certifikat: return .certifikat
+        case .dveHesla: return .dveHesla
+        }
+    }
+
+    public var has2FA: Bool { self == .menoHesloKod || self == .hesloKod }
+
+    public static func join(_ base: Base, twoFA: Bool) -> AuthMode {
+        switch base {
+        case .menoHeslo: return twoFA ? .menoHesloKod : .menoHeslo
+        case .heslo: return twoFA ? .hesloKod : .heslo
+        case .certifikat: return .certifikat
+        case .dveHesla: return .dveHesla
+        }
+    }
+
+    /// Nový jedinečný názov pre klon: „Firma A“ → „Firma A (2)“, „Firma A (2)“ → „Firma A (3)“.
+    public static func uniqueName(_ name: String, existing: [String]) -> String {
+        var stem = name.trimmingCharacters(in: .whitespaces)
+        var n = 2
+        if let r = stem.range(of: #"\s*\((\d+)\)$"#, options: .regularExpression) {
+            let num = stem[r].filter(\.isNumber)
+            n = (Int(num) ?? 1) + 1
+            stem = String(stem[..<r.lowerBound])
+        }
+        let taken = Set(existing.map { $0.lowercased() })
+        while taken.contains("\(stem) (\(n))".lowercased()) { n += 1 }
+        return "\(stem) (\(n))"
+    }
+
     public var needsUser: Bool { [.menoHesloKod, .menoHeslo, .dveHesla].contains(self) }
     public var needsPassword: Bool { self != .certifikat }
     public var needsCode: Bool { [.menoHesloKod, .hesloKod].contains(self) }
