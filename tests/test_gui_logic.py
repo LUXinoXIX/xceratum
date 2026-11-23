@@ -66,6 +66,7 @@ class GuiFlowTests(unittest.TestCase):
         self.QtW.QSystemTrayIcon.available = True
         self.QtW.QMessageBox.choose.clear()
         self.QtW.QMessageBox.answers.clear()
+        self.helper_calls.clear()
         from vpn_pripojenie import config as C
         C.UserState.path().unlink(missing_ok=True)
 
@@ -260,6 +261,90 @@ class GuiFlowTests(unittest.TestCase):
         for i in (0, 1, 3):
             m.set_tab(i)
         self.assertTrue(w.t_keyring.isVisible() or not __import__("shutil").which("secret-tool"))
+
+
+    def test_untrusted_import_ca_button(self):
+        os.environ["FAKE_SCENARIO"] = "untrusted"
+        w = self.make()
+        self.fill(w)
+        self.QtW.QMessageBox.choose.append(1)                    # „Importovať CA certifikát…“
+        w.btn_connect.click()
+        from PyQt6.QtCore import run_single_shots
+        run_single_shots()
+        self.assertFalse(w.connected)
+        self.assertIn("Importovať CA certifikát…", self.QtW.QMessageBox.log[-1][1])
+        self.assertIsNotNone(w.manager)                          # otvorí sa karta Certifikáty
+        self.assertEqual(w.manager.tabs.currentIndex(), 1)
+
+    def test_certificate_mode_without_cert(self):
+        self.write_cfg(Polozky=[{"Cisco": "Firma A", "Nazov": "Cert", "Auth": "Certifikat", "Predvolene": True}])
+        w = self.make()
+        self.assertEqual(w.selected.name, "Cert")
+        self.assertEqual(w.notice.kind, "warn")
+        self.assertIn("nie je nainštalovaný", w.notice.label.text())
+        w.btn_connect.click()
+        self.assertFalse(w.connecting or w.connected)            # bez certifikátu sa ani nezačne
+        self.assertEqual(w.notice.kind, "error")
+        self.assertIn("Importujte súbor .p12", w.notice.label.text())
+
+    @unittest.skipUnless(__import__("shutil").which("openssl"), "chýba openssl")
+    def test_certificate_mode_and_expiry_warning(self):
+        import subprocess
+        from vpn_pripojenie import certs
+        d = certs.client_dir()
+        certs.private_dir().mkdir(parents=True, exist_ok=True)
+        subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "10",
+                        "-keyout", str(certs.private_dir() / "jnovak.key"), "-out", str(d / "jnovak.pem"),
+                        "-subj", "/CN=jnovak"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            self.write_cfg(Polozky=[{"Cisco": "Firma A", "Nazov": "Cert", "Auth": "Certifikat", "Predvolene": True}])
+            self.notes.clear()
+            w = self.make()
+            self.assertEqual(w.notice.kind, "warn")
+            self.assertIn("jnovak vyprší o", w.notice.label.text())
+            self.assertTrue(w._cert_notified)                               # aj notifikácia (raz za spustenie)
+            w.btn_connect.click()                                          # certifikát je → pripájanie začne
+            self.assertIn("Osobný certifikát: jnovak", w.log.toPlainText())
+            self.write_cfg(DniUpozorneniaCertifikat=0)                     # správca vypol upozornenia
+            w2 = self.make()
+            self.assertNotIn("vyprší", w2.notice.label.text() if w2.notice.isVisible() else "")
+        finally:
+            for f in (d / "jnovak.pem", certs.private_dir() / "jnovak.key"):
+                f.unlink(missing_ok=True)
+
+    def test_connections_changed_since_last_start(self):
+        from vpn_pripojenie import config as C
+        st = C.UserState()
+        st.ZnamePripojenia = ["Firma A", "Stara firma"]
+        st.save()
+        w = self.make()
+        text = w.notice.label.text()
+        self.assertIn("Pribudlo pripojenie: Firma B EAP+2FA", text)
+        self.assertIn("Ubudlo pripojenie: Stara firma", text)
+        self.assertEqual(C.UserState.load().ZnamePripojenia, ["Firma B EAP+2FA", "Firma A"])
+        w2 = self.make()
+        self.assertFalse(w2.notice.isVisible() and "Pribudlo" in w2.notice.label.text())
+
+    def test_manager_profile_and_cert_reporting(self):
+        w = self.make()
+        w.open_manager(0)
+        m = w.manager
+        self.assertIn("žiadne profily", m.p_profiles.table.item(0, 0).text())
+        m.set_tab(1)
+        self.assertIn("žiadny osobný certifikát", m.p_certs.cl.item(0, 0).text())
+        calls = []
+        m.say("Test", "warn", ("Reštartovať službu Cisca  🔒", lambda: calls.append("akcia")))
+        self.assertTrue(m.action.isVisible())
+        m._run_action()
+        self.assertEqual(calls, ["akcia"])
+        self.assertFalse(m.action.isVisible())
+        m.set_tab(2)
+        self.assertEqual(m.p_conn.s_warn.value(), 30)
+        m.p_conn.s_warn.setValue(14)
+        m.p_conn.e_cli.setText("")                               # testovacia cesta k CLI nie je v /opt/cisco
+        m.p_conn.save()
+        saved = json.loads((TMP / "etc" / "config.json").read_text())
+        self.assertEqual(saved["DniUpozorneniaCertifikat"], 14)
 
 
 if __name__ == "__main__":

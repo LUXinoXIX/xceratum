@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Optional
 
 SYSTEM_CA_DIR = Path("/opt/.cisco/certificates/ca")
+WARN_DAYS = 30          # predvolene: upozorniť 30 dní pred vypršaním (správca môže zmeniť)
 
 
 def cisco_home() -> Path:
@@ -46,6 +47,8 @@ class CertInfo:
     path: Path
     subject: str = ""
     issuer: str = ""
+    serial: str = ""
+    not_before: Optional[datetime] = None
     not_after: Optional[datetime] = None
     has_key: bool = False
     system: bool = False
@@ -57,13 +60,37 @@ class CertInfo:
         return m.group(1).strip() if m else (self.subject or self.path.stem)
 
     @property
+    def issuer_cn(self) -> str:
+        m = re.search(r"CN\s*=\s*([^,/]+)", self.issuer)
+        return m.group(1).strip() if m else self.issuer
+
+    @property
     def expired(self) -> bool:
         return bool(self.not_after and self.not_after < datetime.now(timezone.utc))
 
     @property
+    def days_left(self) -> Optional[int]:
+        if not self.not_after:
+            return None
+        return (self.not_after - datetime.now(timezone.utc)).days
+
+    def expires_within(self, days: int = WARN_DAYS) -> bool:
+        """Vyprší do `days` dní (0 = neupozorňovať)."""
+        d = self.days_left
+        return bool(days > 0 and d is not None and not self.expired and d < days)
+
+    @property
     def expires_soon(self) -> bool:
-        return bool(self.not_after and not self.expired
-                    and (self.not_after - datetime.now(timezone.utc)).days < 30)
+        return self.expires_within(WARN_DAYS)
+
+    @property
+    def usable(self) -> bool:
+        """Osobný certifikát, ktorý Cisco môže použiť: čitateľný, s kľúčom, platný."""
+        return not self.error and self.has_key and not self.expired
+
+    @property
+    def valid_from(self) -> str:
+        return self.not_before.strftime("%d. %m. %Y") if self.not_before else "?"
 
     @property
     def valid_to(self) -> str:
@@ -80,7 +107,7 @@ def _openssl(args: list, stdin: Optional[bytes] = None) -> subprocess.CompletedP
 def inspect(path: Path, system: bool = False) -> CertInfo:
     info = CertInfo(path=path, system=system)
     try:
-        p = _openssl(["x509", "-noout", "-subject", "-issuer", "-enddate", "-nameopt", "RFC2253", "-in", str(path)])
+        p = _openssl(["x509", "-noout", "-subject", "-issuer", "-serial", "-startdate", "-enddate", "-nameopt", "RFC2253", "-in", str(path)])
     except (CertError, OSError, subprocess.SubprocessError) as e:
         info.error = str(e)
         return info
@@ -95,12 +122,17 @@ def inspect(path: Path, system: bool = False) -> CertInfo:
             info.subject = v.strip()
         elif k == "issuer":
             info.issuer = v.strip()
-        elif k == "notafter":
+        elif k == "serial":
+            info.serial = v.strip()
+        elif k in ("notafter", "notbefore"):
             try:
-                info.not_after = datetime.strptime(v.strip().replace("  ", " "), "%b %d %H:%M:%S %Y %Z") \
-                    .replace(tzinfo=timezone.utc)
+                d = datetime.strptime(" ".join(v.split()), "%b %d %H:%M:%S %Y %Z").replace(tzinfo=timezone.utc)
             except ValueError:
-                pass
+                continue
+            if k == "notafter":
+                info.not_after = d
+            else:
+                info.not_before = d
     return info
 
 
@@ -252,3 +284,107 @@ def _first_line(b: bytes) -> str:
         if line.strip():
             return line.strip()
     return ""
+
+
+# ------------------------------------------------------------------ prehľad pre okno (čo hlásiť používateľovi)
+
+def issuer_installed(cert: CertInfo, cas: list) -> bool:
+    """Je nainštalovaná CA, ktorá certifikát vydala? (porovnanie subjektu CA s vydavateľom)"""
+    norm = lambda s: re.sub(r"\s+", "", s or "").lower()
+    return any(norm(c.subject) == norm(cert.issuer) for c in cas if not c.error)
+
+
+def duplicates(certs_list: list) -> dict:
+    """Cesta → názvy ostatných súborov s rovnakým certifikátom (subjekt + sériové číslo)."""
+    groups: dict = {}
+    for c in certs_list:
+        if c.error:
+            continue
+        groups.setdefault((c.subject, c.serial), []).append(c)
+    out = {}
+    for same in groups.values():
+        if len(same) > 1:
+            for c in same:
+                out[c.path] = [o.path.name for o in same if o is not c]
+    return out
+
+
+def describe_expiry(c: CertInfo, days: int = WARN_DAYS) -> str:
+    """„platný do …“ doplnené o varovanie – rovnaký text v tabuľke aj v hláseniach."""
+    if c.error:
+        return c.error
+    if c.expired:
+        return f"{c.valid_to} – EXPIROVANÝ"
+    if c.expires_within(days):
+        d = c.days_left or 0
+        return f"{c.valid_to} – vyprší o {d} {_days_word(d)}"
+    return c.valid_to
+
+
+def expiry_warnings(days: int = WARN_DAYS, clients: Optional[list] = None, cas: Optional[list] = None) -> list:
+    """Varovania o vypršaní pre hlavné okno: list[(závažnosť 'error'|'warn', text)]."""
+    if days <= 0:
+        return []
+    clients = list_client() if clients is None else clients
+    cas = list_ca() if cas is None else cas
+    out = []
+    for c in clients:
+        if c.error:
+            continue
+        if c.expired:
+            out.append(("error", f"Váš osobný certifikát {c.cn} vypršal {c.valid_to}. Prihlásenie certifikátom "
+                                 "nebude fungovať – požiadajte správcu o nový."))
+        elif c.expires_within(days):
+            d = c.days_left or 0
+            out.append(("warn", f"Váš osobný certifikát {c.cn} vyprší o {d} {_days_word(d)} ({c.valid_to}). "
+                                "Požiadajte správcu o nový."))
+    for c in cas:
+        if c.error:
+            continue
+        if c.expired:
+            out.append(("error", f"CA certifikát {c.cn} vypršal {c.valid_to} – server sa ním už neoverí."))
+        elif c.expires_within(days):
+            d = c.days_left or 0
+            out.append(("warn", f"CA certifikát {c.cn} vyprší o {d} {_days_word(d)} ({c.valid_to})."))
+    out.sort(key=lambda x: x[0] != "error")
+    return out
+
+
+def _days_word(n: int) -> str:
+    return "deň" if n == 1 else ("dni" if 2 <= n <= 4 else "dní")
+
+
+def firefox_profiles() -> list:
+    """Profily Firefoxu (aj Snap a Flatpak) s úložiskom certifikátov NSS."""
+    home = Path.home()
+    bases = [home / ".mozilla/firefox", home / "snap/firefox/common/.mozilla/firefox",
+             home / ".var/app/org.mozilla.firefox/.mozilla/firefox"]
+    out = []
+    for b in bases:
+        try:
+            out.extend(sorted(d for d in b.iterdir() if (d / "cert9.db").is_file()))
+        except OSError:
+            continue
+    return out
+
+
+def firefox_user_certs() -> Optional[list]:
+    """Osobné certifikáty vo Firefoxe (príznak u). None = nedá sa zistiť (chýba certutil)."""
+    exe = shutil.which("certutil")
+    profs = firefox_profiles()
+    if not profs:
+        return []
+    if not exe:
+        return None
+    names = []
+    for d in profs:
+        try:
+            p = subprocess.run([exe, "-L", "-d", f"sql:{d}"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                               timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        for line in p.stdout.decode(errors="replace").splitlines():
+            m = re.match(r"^(.+?)\s{2,}(\S*u\S*)\s*$", line)
+            if m and "," in m.group(2) and m.group(1) not in names:
+                names.append(m.group(1).strip())
+    return names

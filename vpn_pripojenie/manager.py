@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 from datetime import datetime
 from html import escape
 from pathlib import Path
@@ -17,8 +18,9 @@ from PyQt6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, Q
 from . import certs, system
 from . import config as C
 from .config import AuthMode, ItemSettings
-from .profiles import PROFILE_DIRS, build_items, list_profile_files, merge_hosts, parse_profile, profile_dir_for, \
-    read_xml_hosts
+from .profiles import PROFILE_DIRS, build_items, host_states, list_profile_files, merge_hosts, not_loaded, \
+    parse_profile, profile_dir_for, read_xml_hosts
+from .prehlad import import_summary, names_of, removal_question
 from .tasks import run_task
 from .theme import ui_font
 
@@ -83,6 +85,11 @@ class ManagerWindow(QDialog):
         self.status = QLabel()
         self.status.setWordWrap(True)
         row.addWidget(self.status, 1)
+        self.action = QPushButton()
+        self.action.hide()
+        self.action.clicked.connect(self._run_action)
+        self._action_fn = None
+        row.addWidget(self.action)
         close = QPushButton("Zavrieť")
         close.clicked.connect(self.close)
         row.addWidget(close)
@@ -97,9 +104,28 @@ class ManagerWindow(QDialog):
         if hasattr(w, "refresh"):
             w.refresh()
 
-    def say(self, text: str, ok: bool = True):
-        color = "#0E7A0D" if ok else "#B10E1C"
+    def say(self, text: str, ok=True, action=None):
+        """Stavový riadok okna: ok = True (zelená), False (červená), "warn" (oranžová), "info" (sivá).
+
+        action = (text tlačidla, funkcia) – tlačidlo vedľa hlásenia, napr. Reštartovať službu Cisca.
+        """
+        color = {True: "#0E7A0D", False: "#B10E1C", "warn": "#9A5B00", "info": "#5A6270"}.get(ok, "#0E7A0D")
         self.status.setText(f"<span style='color:{color}'>{escape(text)}</span>")
+        self.status.setToolTip(text)
+        self._action_fn = action[1] if action else None
+        self.action.setText(action[0] if action else "")
+        self.action.setVisible(bool(action))
+
+    def _run_action(self):
+        fn = self._action_fn
+        self.action.hide()
+        self._action_fn = None
+        if fn:
+            fn()
+
+    @property
+    def warn_days(self) -> int:
+        return self.main.cfg.DniUpozorneniaCertifikat
 
     def admin(self, args: list, after=None, what: str = ""):
         """Spustí pomocný skript cez pkexec na pozadí (okno polkit sa zobrazí samo)."""
@@ -151,8 +177,11 @@ class ProfilesTab(QWidget):
                                   "reštartujte službu Cisca na karte Diagnostika."))
 
     def refresh(self):
+        """Tabuľka hneď z XML, stav („v roletke“, „Cisco ho zatiaľ nenačítal“…) po overení cez `vpn hosts`."""
         self.table.setRowCount(0)
-        for pf in list_profile_files(PROFILE_DIRS):
+        files = list_profile_files(PROFILE_DIRS)
+        self._rows = []
+        for pf in files:
             hosts = pf.hosts or [None]
             for h in hosts:
                 r = self.table.rowCount()
@@ -161,10 +190,33 @@ class ProfilesTab(QWidget):
                 self.table.setItem(r, 1, cell(h.host_name if h else "–"))
                 self.table.setItem(r, 2, cell(h.address if h else "–"))
                 self.table.setItem(r, 3, cell((h.protocol or "SSL") if h else "–"))
-                self.table.setItem(r, 4, cell(pf.error or ("OK" if pf.hosts else "bez pripojení")))
+                st = pf.error or ("overujem v Cisco…" if pf.hosts else "bez pripojení – Cisco z neho nič neponúkne")
+                self.table.setItem(r, 4, cell(st))
+                self._rows.append((pf.path.name, h.host_name if h else None))
         if self.table.rowCount() == 0:
             self.table.insertRow(0)
             self.table.setItem(0, 0, cell("(žiadne profily)"))
+            self.table.setItem(0, 4, cell("bez profilu sa nedá pripojiť – pridajte XML profil od správcu"))
+            return
+        cli = self.win.main.cli
+
+        def work():
+            return cli.hosts() if (cli.available and system.agent_running()) else None
+
+        def done(names):
+            if isinstance(names, Exception):
+                names = None
+            states = host_states(files, names, self.win.main.cfg)
+            for r, (fname, host) in enumerate(self._rows):
+                if host is not None and (fname, host) in states and r < self.table.rowCount():
+                    self.table.setItem(r, 4, cell(states[(fname, host)]))
+            waiting = sorted({h for (f, h), t in states.items() if "nenačítal" in t})
+            if waiting and not self.win.action.isVisible():
+                self.win.say("Cisco ešte neponúka pripojenia: " + ", ".join(waiting) +
+                             ". Načíta ich po reštarte služby Cisca.", "warn",
+                             ("Reštartovať službu Cisca  🔒", self.win.p_diag.restart_agent))
+
+        run_task(self, work, done)
 
     def _selected_path(self):
         r = self.table.currentRow()
@@ -195,9 +247,42 @@ class ProfilesTab(QWidget):
         shutil.copyfile(src, tmp)
         os.chmod(tmp, 0o600)
 
+        cli = self.win.main.cli
+
+        def check():
+            # Cisco načíta nový profil obvykle do pár sekúnd – overiť, čo naozaj ponúka
+            if not (cli.available and system.agent_running()):
+                return None
+            names = []
+            for _ in range(3):
+                time.sleep(2)
+                names = cli.hosts()
+                if not not_loaded(pf, names):
+                    break
+            return names
+
+        def checked(names, installed_msg):
+            self.refresh()
+            if isinstance(names, Exception) or names is None:
+                self.win.say(installed_msg + " Služba Cisca nebeží, preto sa nedá overiť, či profil načítala.",
+                             "warn", ("Reštartovať službu Cisca  🔒", self.win.p_diag.restart_agent))
+                return
+            missing = not_loaded(pf, names)
+            if missing:
+                self.win.say(installed_msg + " Cisco ho zatiaľ nenačítal (chýba: " + ", ".join(missing) +
+                             "). Reštartujte službu Cisca.", "warn",
+                             ("Reštartovať službu Cisca  🔒", self.win.p_diag.restart_agent))
+            else:
+                self.win.say(installed_msg + " Cisco ponúka: " + names_of(pf) + " – nájdete ich v roletke.")
+
         def after(ok):
             shutil.rmtree(tmpdir, ignore_errors=True)
-            self.refresh()
+            if not ok:
+                self.refresh()
+                return
+            msg = self.win.status.toolTip()
+            self.win.say(msg + " Overujem, či ho Cisco načítal…", "info")
+            run_task(self, check, lambda names: checked(names, msg))
 
         self.win.admin(["install-profile", str(tmp), str(self.dir)], after, "profiles")
 
@@ -205,8 +290,8 @@ class ProfilesTab(QWidget):
         p = self._selected_path()
         if not p:
             return
-        if QMessageBox.question(self, "XML profil", f"Odstrániť profil {p.name}?\n"
-                                "Pôvodný súbor sa uloží do zálohy (backup).") != QMessageBox.StandardButton.Yes:
+        if QMessageBox.question(self, "XML profil", removal_question(p, self.win.main)) \
+                != QMessageBox.StandardButton.Yes:
             return
         self.win.admin(["remove-profile", p.name, str(p.parent)], lambda ok: self.refresh(), "profiles")
 
@@ -227,6 +312,7 @@ class CertsTab(QWidget):
         g1 = QGroupBox("Certifikačné autority (CA) – overenie servera")
         l1 = QVBoxLayout(g1)
         self.ca = make_table(["Názov (CN)", "Platný do", "Pre koho", "Súbor"])
+        self.ca.setToolTip("Certifikačné autority, ktorými Cisco overuje VPN server.")
         self.ca.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         l1.addWidget(self.ca)
         r1 = QHBoxLayout()
@@ -244,7 +330,7 @@ class CertsTab(QWidget):
 
         g2 = QGroupBox("Osobný certifikát – prihlásenie certifikátom")
         l2 = QVBoxLayout(g2)
-        self.cl = make_table(["Komu je vydaný (CN)", "Platný do", "Súkromný kľúč", "Súbor"])
+        self.cl = make_table(["Komu je vydaný (CN)", "Vydal (CA)", "Platný do", "Súkromný kľúč", "Súbor"])
         self.cl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         l2.addWidget(self.cl)
         r2 = QHBoxLayout()
@@ -262,8 +348,11 @@ class CertsTab(QWidget):
             "kľúč v client/private/) a z /opt/.cisco/certificates/ca (pre všetkých). Súbor .p12 sa preto pri "
             "importe rozbalí na certifikát a kľúč (kľúč je čitateľný len pre vás). Cisco prednostne hľadá aj "
             "v úložisku Firefoxu – ak je tam starší certifikát, môže mať prednosť."))
+        self.ff = muted_label("")
+        self.ff.hide()
+        lay.addWidget(self.ff)
 
-    def refresh(self):
+    def refresh(self, summary: bool = True):
         def fill(table, rows):
             table.setRowCount(0)
             for vals, data in rows:
@@ -272,16 +361,60 @@ class CertsTab(QWidget):
                 for c, v in enumerate(vals):
                     table.setItem(r, c, cell(v, data if c == 0 else None))
 
-        def when(ci):
-            if ci.error:
-                return ci.error
-            s = ci.valid_to
-            return s + (" – EXPIROVANÝ" if ci.expired else (" – čoskoro vyprší" if ci.expires_soon else ""))
+        days = self.win.warn_days
+        cas = certs.list_ca()
+        clients = certs.list_client()
+        dup_ca = certs.duplicates(cas)
+        dup_cl = certs.duplicates(clients)
 
-        fill(self.ca, [((c.cn, when(c), "všetci" if c.system else "len ja", c.path.name), c)
-                       for c in certs.list_ca()])
-        fill(self.cl, [((c.cn, when(c), "áno" if c.has_key else "CHÝBA", c.path.name), c)
-                       for c in certs.list_client()])
+        def file_col(c, dup):
+            return c.path.name + (f" · rovnaký ako {', '.join(dup[c.path])}" if c.path in dup else "")
+
+        def issuer_col(c):
+            if c.error:
+                return "–"
+            if c.issuer == c.subject:
+                return f"{c.issuer_cn} (sám sebe)"
+            return c.issuer_cn + ("" if certs.issuer_installed(c, cas) else " · CA nie je nainštalovaná")
+
+        fill(self.ca, [((c.cn, certs.describe_expiry(c, days), "všetci" if c.system else "len ja",
+                         file_col(c, dup_ca)), c) for c in cas])
+        fill(self.cl, [((c.cn, issuer_col(c), certs.describe_expiry(c, days),
+                         "áno" if c.has_key else "CHÝBA – certifikát sa nedá použiť", file_col(c, dup_cl)), c)
+                       for c in clients])
+        if not cas:
+            self.ca.insertRow(0)
+            self.ca.setItem(0, 0, cell("(žiadna CA)"))
+            self.ca.setItem(0, 1, cell("Cisco použije len CA systému; ak server neoverí, importujte firemnú CA"))
+        if not clients:
+            self.cl.insertRow(0)
+            self.cl.setItem(0, 0, cell("(žiadny osobný certifikát)"))
+            self.cl.setItem(0, 1, cell("treba len pre pripojenia s prihlásením certifikátom"))
+        if summary:                           # súhrn len pri otvorení karty, neprepíše výsledok akcie
+            self._summary(cas, clients, days)
+        run_task(self, certs.firefox_user_certs, self._firefox)
+
+    def _summary(self, cas, clients, days):
+        warns = certs.expiry_warnings(days, clients, cas)
+        if warns:
+            kind, text = warns[0]
+            more = f" (a ďalšie upozornenia: {len(warns) - 1})" if len(warns) > 1 else ""
+            self.win.say(text + more, False if kind == "error" else "warn")
+        elif clients or cas:
+            ok = [c for c in clients if c.usable]
+            parts = []
+            if clients:
+                parts.append(f"osobné certifikáty: {len(ok)} z {len(clients)} použiteľné")
+            parts.append(f"CA: {len(cas)}")
+            self.win.say("Certifikáty sú v poriadku – " + ", ".join(parts) + ".", "info")
+
+    def _firefox(self, names):
+        if isinstance(names, Exception) or not names:
+            self.ff.hide()
+            return
+        self.ff.setText("Vo Firefoxe sú aj osobné certifikáty: " + ", ".join(names) +
+                        ". Cisco ich môže použiť prednostne pred certifikátmi vyššie.")
+        self.ff.show()
 
     @staticmethod
     def _sel(table):
@@ -303,15 +436,16 @@ class CertsTab(QWidget):
                 final = tmp.with_name(name + ".pem")
                 tmp.replace(final)
                 self.win.admin(["install-ca", str(final)],
-                               lambda ok: (final.unlink(missing_ok=True), self.refresh()), "certs")
+                               lambda ok: (final.unlink(missing_ok=True), self.refresh(False)), "certs")
                 return
             dest = certs.import_ca_user(src)
         except certs.CertError as e:
             QMessageBox.warning(self, "CA certifikát", str(e))
             return
-        self.win.say(f"CA certifikát uložený: {dest}")
+        info = certs.inspect(dest)
+        self.refresh(False)
+        self.win.say(f"CA certifikát {info.cn} (platný do {info.valid_to}) je uložený len pre vás: {dest}")
         self.win.changed.emit("certs")
-        self.refresh()
 
     def del_ca(self):
         c = self._sel(self.ca)
@@ -321,13 +455,13 @@ class CertsTab(QWidget):
                 != QMessageBox.StandardButton.Yes:
             return
         if c.system:
-            self.win.admin(["remove-ca", c.path.name], lambda ok: self.refresh(), "certs")
+            self.win.admin(["remove-ca", c.path.name], lambda ok: self.refresh(False), "certs")
             return
         try:
             certs.remove_user_ca(c.path)
         except (OSError, certs.CertError) as e:
             QMessageBox.warning(self, "CA certifikát", str(e))
-        self.refresh()
+        self.refresh(False)
 
     def add_p12(self):
         fn, _ = QFileDialog.getOpenFileName(self, "Vyberte osobný certifikát", str(Path.home()),
@@ -350,9 +484,11 @@ class CertsTab(QWidget):
             msg = f"Osobný certifikát {info.cn} je importovaný (platný do {info.valid_to})."
             if n_ca:
                 msg += f" Pribudlo aj {n_ca} CA z balíka."
+            self.refresh(False)
             self.win.say(msg)
             self.win.changed.emit("certs")
-            self.refresh()
+            QMessageBox.information(self, "Osobný certifikát importovaný",
+                                    import_summary(info, path, n_ca, certs.list_ca(), self.win.warn_days))
 
         run_task(self, lambda: certs.import_p12(Path(fn), pw), done)
         pw = ""
@@ -365,7 +501,7 @@ class CertsTab(QWidget):
                 != QMessageBox.StandardButton.Yes:
             return
         certs.remove_client(c.path)
-        self.refresh()
+        self.refresh(False)
 
 
 # ================================================================== Pripojenia (správca)
@@ -432,12 +568,19 @@ class ConnectionsTab(QWidget):
         self.k_drop = QCheckBox("Pri prerušení spojenia otvoriť okno na prihlásenie")
         self.k_banner = QCheckBox("Správu servera (banner) potvrdiť automaticky")
         self.k_keyring = QCheckBox("Povoliť ukladanie hesla v kľúčenke systému (GNOME Keyring / KWallet)")
+        self.s_warn = QSpinBox()
+        self.s_warn.setRange(0, 365)
+        self.s_warn.setSuffix(" dní")
+        self.s_warn.setSpecialValueText("neupozorňovať")
+        self.s_warn.setToolTip("Koľko dní pred vypršaním osobného certifikátu alebo CA upozorniť používateľa "
+                               "(predvolene 30).")
         self.e_cli = QLineEdit()
         self.e_cli.setPlaceholderText("automaticky (/opt/cisco/secureclient/bin/vpn)")
         form.addRow("Nadpis aplikácie", self.e_title)
         form.addRow("Predvolený vzhľad", self.c_theme)
         form.addRow("Po pripojení skryť okno", self.c_hide)
         form.addRow("Limit pripájania", self.s_timeout)
+        form.addRow("Upozorniť na vypršanie certifikátu", self.s_warn)
         form.addRow("Cesta k Cisco CLI", self.e_cli)
         form.addRow("", self.k_drop)
         form.addRow("", self.k_banner)
@@ -470,6 +613,7 @@ class ConnectionsTab(QWidget):
         self.c_hide.setCurrentIndex(self.HIDE_VALUES.index(cfg.SkrytPoSekundach)
                                     if cfg.SkrytPoSekundach in self.HIDE_VALUES else 1)
         self.s_timeout.setValue(cfg.ConnectTimeoutSeconds)
+        self.s_warn.setValue(cfg.DniUpozorneniaCertifikat)
         self.e_cli.setText(cfg.VpnCliPath)
         self.k_drop.setChecked(cfg.PriOdpojeniOtvoritOkno)
         self.k_banner.setChecked(cfg.AutoPrijatBanner)
@@ -599,6 +743,7 @@ class ConnectionsTab(QWidget):
         cfg.Vzhlad = self.THEME_VALUES[self.c_theme.currentIndex()]
         cfg.SkrytPoSekundach = self.HIDE_VALUES[self.c_hide.currentIndex()]
         cfg.ConnectTimeoutSeconds = self.s_timeout.value()
+        cfg.DniUpozorneniaCertifikat = self.s_warn.value()
         cfg.VpnCliPath = cli
         cfg.PriOdpojeniOtvoritOkno = self.k_drop.isChecked()
         cfg.AutoPrijatBanner = self.k_banner.isChecked()
@@ -727,7 +872,12 @@ class DiagTab(QWidget):
             if QMessageBox.question(self, "Služba Cisca", "Reštart služby odpojí VPN. Pokračovať?") \
                     != QMessageBox.StandardButton.Yes:
                 return
-        self.win.admin(["restart-agent"], lambda ok: self.refresh(), "profiles")
+        def after(ok):
+            self.refresh()
+            if ok:
+                self.win.p_profiles.refresh()      # znova overiť, čo Cisco po reštarte ponúka
+
+        self.win.admin(["restart-agent"], after, "profiles")
 
     def open_cisco(self):
         if not system.start_cisco_ui(self.win.main.cli.path):

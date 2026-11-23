@@ -106,6 +106,7 @@ class AdminConfig:
     AutoPrijatBanner: bool = False       # správu servera potvrdiť automaticky („y“)
     PovolitKlucenku: bool = False        # dovoliť uložiť heslo v kľúčenke systému
     PouzitPty: bool = True               # výstup Cisco CLI cez pseudoterminál (bez bufferovania)
+    DniUpozorneniaCertifikat: int = 30   # koľko dní pred vypršaním certifikátu upozorniť (0 = nie)
     Polozky: list = field(default_factory=list)   # list[ItemSettings]
     loaded_from: str = ""                # informačne, neukladá sa
 
@@ -148,6 +149,7 @@ class AdminConfig:
             setattr(cfg, key, val)
         cfg.ConnectTimeoutSeconds = max(10, cfg.ConnectTimeoutSeconds)
         cfg.SkrytPoSekundach = max(-1, min(60, cfg.SkrytPoSekundach))
+        cfg.DniUpozorneniaCertifikat = max(0, min(365, cfg.DniUpozorneniaCertifikat))
         items = []
         for raw in data.get("Polozky") or []:
             if not isinstance(raw, dict):
@@ -184,6 +186,7 @@ class AdminConfig:
             "vzhlad": "Vzhlad", "skrytposekundach": "SkrytPoSekundach",
             "priodpojeniotvoritokno": "PriOdpojeniOtvoritOkno", "autoprijatbanner": "AutoPrijatBanner",
             "povolitklucenku": "PovolitKlucenku", "pouzitpty": "PouzitPty",
+            "dniupozorneniacertifikat": "DniUpozorneniaCertifikat",
         }
         itemmap = {"cisco": "Cisco", "nazov": "Nazov", "auth": "Auth", "meno": "Meno",
                    "group": "Group", "skryt": "Skryt", "predvolene": "Predvolene"}
@@ -251,6 +254,7 @@ class UserState:
     PytaMeno: list = field(default_factory=list)   # HostName pripojení, ktoré si pýtajú meno (naučené)
     UlozitHeslo: bool = False     # heslo v kľúčenke (len ak to správca povolí)
     SystemovyRam: bool = False    # okno so systémovým rámom namiesto vlastnej hlavičky
+    ZnamePripojenia: list = field(default_factory=list)   # pripojenia z Cisca pri poslednom spustení
 
     @staticmethod
     def path() -> Path:

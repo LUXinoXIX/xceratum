@@ -203,3 +203,61 @@ def manual_item(address: str, cfg: AdminConfig) -> VpnProfile:
     address = address.strip()
     return VpnProfile(host_name=address, name=address, auth=cfg.default_auth,
                       address=address, group=cfg.Group, manual=True)
+
+
+# ------------------------------------------------------------------ prehľad pre okno (čo hlásiť používateľovi)
+
+def host_states(files: list, cli_names: Optional[list], cfg: AdminConfig) -> dict:
+    """Stav každého pripojenia v profiloch: (súbor, HostName) → text pre stĺpec Stav.
+
+    cli_names = None znamená, že služba Cisca nebeží a nedá sa overiť, čo Cisco načítal.
+    """
+    loaded = {n.lower() for n in cli_names} if cli_names is not None else None
+    where: dict = {}
+    for pf in files:
+        for h in pf.hosts:
+            where.setdefault(h.host_name.lower(), []).append(pf.path.name)
+    out = {}
+    for pf in files:
+        for h in pf.hosts:
+            key = h.host_name.lower()
+            item = next((i for i in cfg.Polozky if i.Cisco.lower() == key), None)
+            if loaded is None:
+                text = "nedá sa overiť – služba Cisca nebeží"
+            elif key not in loaded:
+                text = "Cisco ho zatiaľ nenačítal – reštartujte službu"
+            elif item and item.Skryt:
+                text = "skryté správcom"
+            else:
+                text = "v roletke" + (" (predvolené)" if item and item.Predvolene else "")
+            others = [f for f in where[key] if f != pf.path.name]
+            if others:
+                text += " · rovnaký názov aj v " + ", ".join(others)
+            out[(pf.path.name, h.host_name)] = text
+    return out
+
+
+def not_loaded(pf: ProfileFile, cli_names: list) -> list:
+    """Pripojenia z profilu, ktoré Cisco (`vpn hosts`) ešte neponúka."""
+    loaded = {n.lower() for n in cli_names}
+    return [h.host_name for h in pf.hosts if h.host_name.lower() not in loaded]
+
+
+def changes(before: list, now: list) -> tuple:
+    """(pribudli, ubudli) – porovnanie pripojení z Cisca so stavom pri poslednom spustení."""
+    b = {x.lower(): x for x in before}
+    n = {x.lower(): x for x in now}
+    return [n[k] for k in n if k not in b], [b[k] for k in b if k not in n]
+
+
+def describe(p: VpnProfile) -> str:
+    """Bublina k pripojeniu v roletke: odkiaľ je a ako sa prihlasuje."""
+    if p.manual:
+        return f"Ručne zadaná adresa: {p.address}\nCisco nepoužije nastavenia profilu (napr. IPsec/EAP)."
+    lines = [f"Pripojenie v Cisco: {p.host_name}"]
+    if p.address:
+        lines.append(f"Server: {p.address}")
+    lines.append("Profil: " + (p.xml_file or "nie je v XML (len z Cisca)"))
+    lines.append("Protokol: " + (p.protocol or "SSL"))
+    lines.append("Prihlásenie: " + p.auth.label + ("" if p.configured else " (odhad – správca nenastavil)"))
+    return "\n".join(lines)

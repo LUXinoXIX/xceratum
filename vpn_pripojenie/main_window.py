@@ -11,11 +11,11 @@ from PyQt6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QHBoxLayou
                              QLayout, QMenu, QMessageBox, QPlainTextEdit, QSystemTrayIcon,
                              QTextBrowser, QVBoxLayout, QWidget)
 
-from . import __version__, icons, system
+from . import __version__, certs, icons, system
 from . import config as C
 from . import theme as TH
 from .cisco import STEP_LABELS, CiscoCli, Outcome, Result, Stats, find_cli, format_bytes, format_duration
-from .profiles import VpnProfile, build_items, manual_item, merge_hosts, read_xml_hosts
+from .profiles import VpnProfile, build_items, changes, describe, manual_item, merge_hosts, read_xml_hosts
 from .tasks import ConnectThread, run_task
 from .theme import ui_font
 from .widgets import (CheckCircle, DetailsTable, FieldBox, FlatButton, HeaderBar, LinkButton, LogView, Notice,
@@ -52,6 +52,9 @@ class MainWindow(QWidget):
         self.busy = False
         self.exiting = False
         self.pending_reload = False
+        self.client_certs: list = []          # osobné certifikáty (PEM) pri poslednom načítaní
+        self.firefox_certs = None             # osobné certifikáty vo Firefoxe; None = nedá sa zistiť
+        self._cert_notified = False
         self.connected_since = 0.0
         self.countdown_left = 0
         self.worker: Optional[ConnectThread] = None
@@ -342,6 +345,9 @@ class MainWindow(QWidget):
                 res["gui_disabled"] = system.disable_cisco_gui()
             if check_state and res["agent"]:
                 res["stats"] = cli.stats()
+            res["clients"] = certs.list_client()
+            res["cas"] = certs.list_ca()
+            res["firefox"] = certs.firefox_user_certs()
             return res
 
         run_task(self, work, self._items_loaded)
@@ -357,6 +363,9 @@ class MainWindow(QWidget):
         self.footer_label.setText(f"Cisco Secure Client {self.cisco_version}".strip() +
                                   (" · služba beží" if agent else " · služba nebeží"))
         self.items = build_items(self.cfg, res.get("hosts", []))
+        self.client_certs = res.get("clients", [])
+        self.firefox_certs = res.get("firefox")
+        news = self._news(res, agent)
         vis = self.visible_items()
         sel = next((p for p in vis if p.key.lower() == self.user.PoslednaPolozka.lower()), None)
         sel = sel or next((p for p in vis if p.host_name.lower() == self.user.PosledneCisco.lower()), None)
@@ -374,6 +383,10 @@ class MainWindow(QWidget):
                                           "v ≡ → Profily a certifikáty.")
         else:
             self.pill.set_state("off")
+            if news:
+                kind = "error" if any(k == "error" for k, _ in news) else \
+                    ("warn" if any(k == "warn" for k, _ in news) else "info")
+                self.notice.show_msg(kind, "\n".join(t for _, t in news))
         st: Optional[Stats] = res.get("stats")
         if st and st.state in ("Connected", "Reconnecting"):
             self._on_connected(self.selected, self.user.Meno if self.user.Zapamatat else "", st, countdown=False)
@@ -383,6 +396,47 @@ class MainWindow(QWidget):
             self.pending_reload = False
         self._update_connect_enabled()
         self._focus_first_empty()
+
+    def _news(self, res: dict, agent: bool) -> list:
+        """Čo sa zmenilo od minula – pripojenia z Cisca a certifikáty, ktoré vypršia. list[(druh, text)]."""
+        out = []
+        if agent:
+            now = [h.host_name for h in res.get("hosts", [])]
+            before = list(self.user.ZnamePripojenia)
+            if before:
+                added, removed = changes(before, now)
+                if added:
+                    out.append(("info", "Pribudlo pripojenie: " + ", ".join(added) + "."))
+                if removed:
+                    out.append(("warn", "Ubudlo pripojenie: " + ", ".join(removed) +
+                                " (profil bol odstránený alebo zmenený)."))
+            if now != before:
+                self.user.ZnamePripojenia = now
+                self.user.save()
+        warns = certs.expiry_warnings(self.cfg.DniUpozorneniaCertifikat, res.get("clients", []), res.get("cas", []))
+        out.extend(warns)
+        if warns and not getattr(self, "_cert_notified", False):
+            self._cert_notified = True           # notifikácia raz za spustenie
+            self._notify("Certifikát VPN", warns[0][1])
+        return out
+
+    def _cert_choice(self) -> tuple:
+        """(použiteľné osobné certifikáty, text pre okno) pre pripojenie s prihlásením certifikátom."""
+        clients = getattr(self, "client_certs", [])
+        usable = [c for c in clients if c.usable]
+        if usable:
+            c = usable[0]
+            more = f" (nainštalovaných {len(usable)}, Cisco vyberie podľa servera)" if len(usable) > 1 else ""
+            return usable, (f"Toto pripojenie overí váš osobný certifikát {c.cn} (platný do {c.valid_to}){more}. "
+                            "Nič nezadávate, stačí Pripojiť.")
+        ff = getattr(self, "firefox_certs", None)
+        expired = [c for c in clients if c.expired]
+        why = (f"Váš certifikát {expired[0].cn} vypršal {expired[0].valid_to}." if expired else
+               "Osobný certifikát nie je nainštalovaný." if not clients else
+               "Nainštalovanému certifikátu chýba súkromný kľúč.")
+        if ff:
+            return [], (why + " Cisco skúsi certifikát z Firefoxu (" + ", ".join(ff) + ").")
+        return [], (why + " Importujte súbor .p12 v ≡ → Profily a certifikáty → Certifikáty.")
 
     def visible_items(self) -> list:
         return [p for p in self.items if not p.hidden and not p.missing]
@@ -406,8 +460,11 @@ class MainWindow(QWidget):
                     self.f_user.edit.setText(self.user.Meno)
         else:
             self.f_profile.set_value("–")
-        if p and p.auth.value == "Certifikat" and self.notice.isHidden():
-            self.notice.show_msg("info", "Toto pripojenie overí váš osobný certifikát. Nič nezadávate, stačí Pripojiť.")
+        if p:
+            self.f_profile.setToolTip(describe(p))
+        if p and p.auth.value == "Certifikat" and (self.notice.isHidden() or self.notice.kind == "info"):
+            usable, text = self._cert_choice()
+            self.notice.show_msg("info" if usable else "warn", text)
         elif p and p.manual:
             self.notice.show_msg("warn", "Pri ručne zadanej adrese Cisco nepoužije nastavenia profilu "
                                          "(napr. protokol IPsec). Ak to ide, vyberte pripojenie z roletky.")
@@ -457,8 +514,10 @@ class MainWindow(QWidget):
             a = QAction(p.name + (f"\t{extra} · {p.auth.label}" if extra else f"\t{p.auth.label}"), m)
             a.setCheckable(True)
             a.setChecked(p is self.selected)
+            a.setToolTip(describe(p))
             a.triggered.connect(lambda _=False, prof=p: self._select(prof))
             m.addAction(a)
+        m.setToolTipsVisible(True)
         manual = [p for p in self.items if p.manual]
         for p in manual:
             a = QAction(f"{p.name}\tručne zadaná adresa", m)
@@ -612,6 +671,16 @@ class MainWindow(QWidget):
         if self.busy or not self._inputs_valid() or not self.cli.available or not self.selected:
             return
         prof = self.selected
+        cert_line = ""
+        if prof.auth.value == "Certifikat":
+            usable, text = self._cert_choice()
+            if not usable and self.firefox_certs == []:
+                # bez certifikátu Cisco aj tak zlyhá – povedať to hneď a poslať na import
+                self.pill.set_state("off")
+                self.notice.show_msg("error", text)
+                return
+            cert_line = (f"Osobný certifikát: {usable[0].cn}, platný do {usable[0].valid_to}" if usable else
+                         "Osobný certifikát: hľadá sa vo Firefoxe")
         user = self.f_user.edit.text().strip() if not self.f_user.isHidden() else ""
         pw = self.f_pw.edit.text() if prof.needs_password else ""
         code = self.f_code.edit.text()
@@ -639,6 +708,8 @@ class MainWindow(QWidget):
         self.notice.hide()
         self.code_hint.hide()
         self.log.clear_log()
+        if cert_line:
+            self.log.append_text(cert_line + "\n")
         self._set_inputs_enabled(False)
         self.btn_connect.setText("Pripájam…  (kliknutím zrušíte)")
         self.btn_connect.set_busy(True)
@@ -693,10 +764,14 @@ class MainWindow(QWidget):
                         "Pripájajte sa len vtedy, ak vám to potvrdil správca.")
             box.setDetailedText(text)
             no = box.addButton("Nepripájať", QMessageBox.ButtonRole.RejectRole)
+            ca = box.addButton("Importovať CA certifikát…", QMessageBox.ButtonRole.ActionRole)
             box.addButton("Pripojiť aj tak", QMessageBox.ButtonRole.AcceptRole)
             box.setDefaultButton(no)
             box.exec()
-            ans = box.clickedButton() is not no
+            clicked = box.clickedButton()
+            ans = clicked is not no and clicked is not ca
+            if clicked is ca:
+                QTimer.singleShot(0, lambda: self.open_manager(1))
         if self.worker:
             self.worker.answer(ans)
 

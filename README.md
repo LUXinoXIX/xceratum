@@ -12,10 +12,10 @@ Balíky sú univerzálne – ten istý súbor ide na x64 aj ARM. Hotové sú v z
 
 ```bash
 # Ubuntu 24.04 / 26.04 (PyQt6 sa doinštaluje z repozitára)
-sudo apt install ./vpn-pripojenie_1.0.0_all.deb
+sudo apt install ./vpn-pripojenie_1.1.0_all.deb
 # Ubuntu 22.04: to isté; PyQt6 sa pri inštalácii stiahne do /opt/vpn-pripojenie/venv
 # Fedora
-sudo dnf install ./vpn-pripojenie-1.0.0-1.noarch.rpm
+sudo dnf install ./vpn-pripojenie-1.1.0-1.noarch.rpm
 ```
 
 Po inštalácii: **VPN Pripojenie** v ponuke aplikácií, po prihlásení sa spúšťa samo (ikona v lište,
@@ -78,6 +78,7 @@ Po inštalácii (Krok 3) sa použije `/usr/libexec/vpn-pripojenie/vpn-pripojenie
   "PriOdpojeniOtvoritOkno": true,
   "AutoPrijatBanner": false,
   "PovolitKlucenku": false,
+  "DniUpozorneniaCertifikat": 30,
   "Polozky": [
     {"Cisco": "Firma A", "Nazov": "Centrála", "Auth": "MenoHesloKod", "Predvolene": true},
     {"Cisco": "Firma B EAP+2FA", "Nazov": "Firma B", "Auth": "MenoHeslo"}
@@ -86,7 +87,22 @@ Po inštalácii (Krok 3) sa použije `/usr/libexec/vpn-pripojenie/vpn-pripojenie
 ```
 
 `Auth`: `MenoHesloKod | HesloKod | MenoHeslo | Heslo | Certifikat | DveHesla`.
+`DniUpozorneniaCertifikat`: koľko dní pred vypršaním osobného certifikátu alebo CA aplikácia upozorní
+(predvolene 30, `0` = neupozorňovať).
 Netreba ho písať ručne – ukladá ho karta „Pripojenia (správca)“ v okne Profily a certifikáty.
+
+## Čo okno hlási o profiloch a certifikátoch
+
+- **Profily:** po inštalácii XML overí cez `vpn hosts`, či Cisco nové pripojenia naozaj načítal; ak nie,
+  ponúkne reštart služby Cisca. Stĺpec Stav: v roletke / skryté správcom / Cisco ho zatiaľ nenačítal /
+  rovnaký názov aj v inom súbore. Pred odstránením povie, ktoré pripojenia zmiznú a či ste cez ne práve pripojený.
+- **Roletka pripojení:** bublina s profilom, serverom, protokolom a spôsobom prihlásenia. Po spustení
+  hlásenie, ak od minula pribudlo alebo ubudlo pripojenie.
+- **Certifikáty:** vydavateľ a či je jeho CA nainštalovaná, duplicitné súbory, osobné certifikáty vo Firefoxe
+  (ak je `certutil`), po importe .p12 zhrnutie (komu, kto vydal, platnosť, kam sa uložil kľúč).
+- **Vypršanie:** upozornenie v hlavnom okne a notifikácia (raz za spustenie).
+- **Pripojenie certifikátom:** v okne aj v priebehu je vidieť, ktorý certifikát sa použije; bez platného
+  certifikátu sa pripájanie nezačne a okno pošle na import. Pri nedôveryhodnom serveri tlačidlo „Importovať CA certifikát…“.
 
 ## Testy
 

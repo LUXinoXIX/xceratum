@@ -6,6 +6,7 @@
   "PriOdpojeniOtvoritOkno": true,
   "AutoPrijatBanner": false,
   "PovolitKlucenku": false,
+  "DniUpozorneniaCertifikat": 30,
   "Polozky": [
     {"Cisco": "Firma A", "Nazov": "Centrála", "Auth": "MenoHesloKod", "Predvolene": true},
     {"Cisco": "Firma B EAP+2FA", "Nazov": "Firma B", "Auth": "MenoHeslo"}

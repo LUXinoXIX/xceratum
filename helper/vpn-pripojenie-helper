@@ -217,7 +217,7 @@ def save_config(src):
         die("Nastavenia nemajú správny tvar.")
     allowed = {"NazovAplikacie", "DefaultAuth", "Group", "VpnCliPath", "ConnectTimeoutSeconds", "Vzhlad",
                "SkrytPoSekundach", "PriOdpojeniOtvoritOkno", "AutoPrijatBanner", "PovolitKlucenku",
-               "PouzitPty", "Polozky"}
+               "PouzitPty", "DniUpozorneniaCertifikat", "Polozky"}
     unknown = set(cfg) - allowed
     if unknown:
         die("Neznáme položky v nastaveniach: " + ", ".join(sorted(unknown)))

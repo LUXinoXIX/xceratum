@@ -281,6 +281,105 @@ class CertTests(unittest.TestCase):
         self.assertFalse(key.exists())
 
 
+    def test_details_issuer_duplicates(self):
+        info = certs.inspect(self.d / "user.pem")
+        self.assertEqual(info.issuer_cn, "Firma Root CA")
+        self.assertTrue(info.serial)
+        self.assertIsNotNone(info.not_before)
+        self.assertGreater(info.days_left, 300)
+        ca = certs.inspect(self.d / "ca.pem")
+        self.assertTrue(certs.issuer_installed(info, [ca]))
+        self.assertFalse(certs.issuer_installed(info, []))
+        dup = self.d / "kopia.pem"
+        shutil.copy(self.d / "user.pem", dup)
+        d = certs.duplicates([info, certs.inspect(dup), ca])
+        self.assertEqual(d[info.path], ["kopia.pem"])
+        self.assertNotIn(ca.path, d)
+        from vpn_pripojenie.prehlad import import_summary
+        text = import_summary(info, self.d / "user.pem", 0, [], 30)
+        self.assertIn("Vydal: Firma Root CA", text)
+        self.assertIn("nie je nainštalovaná", text)
+        self.assertNotIn("nie je nainštalovaná", import_summary(info, self.d / "user.pem", 1, [ca], 30))
+
+
+class OverviewTests(unittest.TestCase):
+    """Čo okno hlási o profiloch a certifikátoch (stav, zmeny, vypršanie)."""
+
+    def files(self):
+        a = profiles.ProfileFile(Path("a.xml"), [profiles.CiscoHost("Firma A", "vpn.firma-a.example", "a.xml"),
+                                                  profiles.CiscoHost("Firma C", "", "a.xml")])
+        b = profiles.ProfileFile(Path("b.xml"), [profiles.CiscoHost("Firma B", "", "b.xml"),
+                                                  profiles.CiscoHost("firma a", "", "b.xml")])
+        return [a, b]
+
+    def test_host_states(self):
+        cfg = C.AdminConfig.from_dict({"Polozky": [{"Cisco": "Firma B", "Skryt": True},
+                                                   {"Cisco": "Firma A", "Predvolene": True}]})
+        st = profiles.host_states(self.files(), ["Firma A", "Firma B"], cfg)
+        self.assertTrue(st[("a.xml", "Firma A")].startswith("v roletke (predvolené)"))
+        self.assertIn("rovnaký názov aj v b.xml", st[("a.xml", "Firma A")])
+        self.assertIn("nenačítal", st[("a.xml", "Firma C")])
+        self.assertEqual(st[("b.xml", "Firma B")], "skryté správcom")
+        off = profiles.host_states(self.files(), None, cfg)
+        self.assertTrue(all("služba Cisca nebeží" in t for t in off.values()))
+        self.assertEqual(profiles.not_loaded(self.files()[0], ["FIRMA A"]), ["Firma C"])
+
+    def test_changes_and_describe(self):
+        self.assertEqual(profiles.changes(["Firma A", "Firma B"], ["firma a", "Firma C"]), (["Firma C"], ["Firma B"]))
+        self.assertEqual(profiles.changes([], []), ([], []))
+        p = prof("Firma A", AuthMode.CERTIFIKAT, address="vpn.firma-a.example", xml_file="a.xml", protocol="IPsec")
+        text = profiles.describe(p)
+        self.assertIn("Profil: a.xml", text)
+        self.assertIn("IPsec", text)
+        self.assertIn("odhad", text)
+        self.assertIn("Ručne", profiles.describe(profiles.manual_item("vpn.firma.sk", C.AdminConfig())))
+
+    def test_expiry(self):
+        from datetime import datetime, timedelta, timezone
+        now = datetime.now(timezone.utc)
+
+        def ci(cn, days, key=True):
+            return certs.CertInfo(Path(cn + ".pem"), subject=f"CN={cn}", not_after=now + timedelta(days=days, hours=1),
+                                  has_key=key)
+        soon, old, fine, ca_soon = ci("jnovak", 12), ci("stary", -3), ci("novy", 200), ci("Firma CA", 20)
+        w = certs.expiry_warnings(30, [soon, old, fine], [ca_soon])
+        self.assertEqual(w[0][0], "error")
+        self.assertIn("stary vypršal", w[0][1])
+        self.assertTrue(any("jnovak vyprší o 12 dní" in t for _, t in w))
+        self.assertTrue(any("Firma CA" in t for _, t in w))
+        self.assertFalse(any("novy" in t for _, t in w))
+        self.assertEqual([t for _, t in certs.expiry_warnings(10, [soon], [ca_soon])], [])
+        self.assertEqual(certs.expiry_warnings(0, [old], []), [])           # 0 = neupozorňovať
+        self.assertIn("vyprší o 2 dni", certs.describe_expiry(ci("x", 2)))
+        self.assertIn("EXPIROVANÝ", certs.describe_expiry(old))
+        self.assertTrue(soon.usable)
+        self.assertFalse(old.usable)
+        self.assertFalse(ci("bez", 100, key=False).usable)
+
+    def test_warn_days_setting(self):
+        self.assertEqual(C.AdminConfig().DniUpozorneniaCertifikat, 30)
+        self.assertEqual(C.AdminConfig.from_dict({"DniUpozorneniaCertifikat": 900}).DniUpozorneniaCertifikat, 365)
+        self.assertEqual(C.AdminConfig.from_dict({"DniUpozorneniaCertifikat": "14"}).DniUpozorneniaCertifikat, 14)
+        cfg = C.AdminConfig._from_ini("[Vseobecne]\nDniUpozorneniaCertifikat=60\n")
+        self.assertEqual(cfg.DniUpozorneniaCertifikat, 60)
+        helper = (ROOT / "helper" / "vpn-pripojenie-helper").read_text()
+        self.assertIn('"DniUpozorneniaCertifikat"', helper)       # pomocný skript ho prijme pri ukladaní
+        self.assertIn("DniUpozorneniaCertifikat", C.AdminConfig().to_dict())
+
+    def test_removal_question(self):
+        from types import SimpleNamespace
+        from vpn_pripojenie.prehlad import removal_question
+        xml = TMP / "odstranit.xml"
+        xml.write_text(PROFILE_XML)
+        cfg = C.AdminConfig.from_dict({"Polozky": [{"Cisco": "Certifikat", "Nazov": "Firma Cert", "Predvolene": True}]})
+        main = SimpleNamespace(cfg=cfg, connected=True, selected=prof("Firma B EAP+2FA"))
+        q = removal_question(xml, main)
+        self.assertIn("zmiznú pripojenia: Firma B EAP+2FA, Certifikat", q)
+        self.assertIn("Práve ste pripojený", q)
+        self.assertIn("Firma Cert – predvolené", q)
+        main.connected = False
+        self.assertNotIn("Práve ste pripojený", removal_question(xml, main))
+
 class HelperTests(unittest.TestCase):
     """Validácia v pomocnom skripte (bez roota – len kontroly pred zápisom)."""
 
