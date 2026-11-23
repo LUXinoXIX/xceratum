@@ -279,13 +279,13 @@ enum CiscoSystem {
             Shell.run("/bin/launchctl", ["bootout", "gui/\(uid)/\(l)"])
             Shell.run("/bin/launchctl", ["disable", "gui/\(uid)/\(l)"])
         }
-        Shell.run("/bin/launchctl", ["enable", "gui/\(uid)/\(App.agentLabel)"])
+        Shell.run("/bin/launchctl", ["enable", "gui/\(uid)/\(AppInfo.agentLabel)"])
     }
 
     /// Režim pôvodné Cisco: okno Cisca späť, Firemná VPN sa sama nespúšťa.
     static func enableCiscoGUI() {
         for l in guiLabels { Shell.run("/bin/launchctl", ["enable", "gui/\(uid)/\(l)"]) }
-        Shell.run("/bin/launchctl", ["disable", "gui/\(uid)/\(App.agentLabel)"])
+        Shell.run("/bin/launchctl", ["disable", "gui/\(uid)/\(AppInfo.agentLabel)"])
         for app in ["/Applications/Cisco/Cisco Secure Client.app", "/Applications/Cisco/Cisco AnyConnect Secure Mobility Client.app"]
         where FileManager.default.fileExists(atPath: app) {
             NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: app), configuration: NSWorkspace.OpenConfiguration())
@@ -309,7 +309,7 @@ enum Notify {
     }
 }
 
-enum App {
+enum AppInfo {
     static let agentLabel = "org.xceratum.firemnavpn"
     static var version: String {
         (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "vývoj"
