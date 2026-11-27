@@ -380,6 +380,8 @@ final class AppModel: ObservableObject {
     }
 
     private func outage() {
+        let c = cli
+        Task.detached { c.logDrop("Cisco hlási Disconnected, používateľ neodpájal") }
         screen = .login
         notice = .outage
         failAt = nil

@@ -48,6 +48,8 @@ public final class CiscoCLI: @unchecked Sendable {
     public let path: String?
     public var timeout: TimeInterval
     public var usePty: Bool
+    /// Ako dlho po „state: Connected“ ešte čítať výstup Cisca – ak spojenie hneď spadne, Cisco to napíše sem.
+    public var settleSeconds: TimeInterval = 5
     public var logURL: URL
 
     public init(configured: String = "", timeout: Int = 90, usePty: Bool = true, logURL: URL? = nil) {
@@ -196,6 +198,7 @@ public final class CiscoCLI: @unchecked Sendable {
         var result: ConnectResult?
         var error = "", original = ""
         var eof = false
+        var connectedAt: Date?
         let secrets = [cred.password, cred.second]
 
         func send(_ line: String, _ shown: String) {
@@ -262,11 +265,25 @@ public final class CiscoCLI: @unchecked Sendable {
                 progress(step, msg)
             }
 
+            // Po „Connected“ ešte chvíľu sledovať, či Cisco spojenie hneď neukončí (napr. politika, rozšírenie, server).
+            if let at = connectedAt {
+                if CiscoParse.matches(#"state:\s*(Disconnecting|Disconnected)|error:|terminated|disconnected"#, tail) {
+                    result = .failed
+                    let e = CiscoParse.lastErrorLine(tail)
+                    original = e.isEmpty ? CiscoParse.lastCiscoMessage(buf) : e
+                    error = Messages.translate(original) ?? "Cisco spojenie vytvorilo, ale hneď ho ukončilo."
+                    break
+                }
+                if Date().timeIntervalSince(at) >= settleSeconds || (eof && !io.isRunning) { break }
+                continue
+            }
             if cancelled() { result = .cancelled; break }
             if CiscoParse.matches(#"state:\s*Connected"#, tail) {
                 result = .connected
+                connectedAt = Date()
                 progress(3, "Connected")
-                break
+                markHandled()
+                continue
             }
             if CiscoParse.matches(#"login failed|authentication failed|access denied|login denied"#, tail) {
                 result = .loginFailed; break
@@ -364,14 +381,23 @@ public final class CiscoCLI: @unchecked Sendable {
             return Outcome(finalResult!, error, original)
         case .declined?:
             return Outcome(.declined, error, original)
-        case .connected?, nil:
-            if waitConnected(tries: finalResult == .connected ? 5 : 1) { return Outcome(.connected) }
+        case .connected?:
+            // stav musí byť Connected a ostať tak aj o chvíľu neskôr (nie len na okamih)
+            if waitConnected(tries: 5) {
+                Thread.sleep(forTimeInterval: 2)
+                if state() == "Connected" { return Outcome(.connected) }
+                return Outcome(.failed, "Cisco spojenie vytvorilo, ale o chvíľu ho ukončilo.",
+                               CiscoParse.lastCiscoMessage(finalBuf))
+            }
+            return Outcome(.failed, "Cisco hlásilo pripojenie, ale stav nie je Connected.", CiscoParse.lastCiscoMessage(finalBuf))
+        case nil:
+            if waitConnected(tries: 1) { return Outcome(.connected) }
             if finalResult == nil {
                 let err = CiscoParse.lastErrorLine(finalBuf).isEmpty ? CiscoParse.lastLine(finalBuf) : CiscoParse.lastErrorLine(finalBuf)
                 let (sk, orig) = Messages.friendly(err)
                 return Outcome(.failed, sk, orig)
             }
-            return Outcome(.failed, "Cisco hlásilo pripojenie, ale stav nie je Connected.", CiscoParse.lastLine(finalBuf))
+            return Outcome(.failed, "Pripojenie sa nepodarilo.", CiscoParse.lastLine(finalBuf))
         case .otherClient?:
             let (sk, _) = Messages.friendly("connect capability is unavailable")
             return Outcome(.otherClient, sk, CiscoParse.lastLine(finalBuf))
@@ -390,6 +416,29 @@ public final class CiscoCLI: @unchecked Sendable {
             if i < tries - 1 { Thread.sleep(forTimeInterval: 1) }
         }
         return false
+    }
+
+    /// Diagnostika pri nečakanom odpojení: stav Cisca a posledné správy služby Cisca zo systémového logu.
+    public func logDrop(_ reason: String) {
+        let st = run(["state"], timeout: 15)
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/log")
+        p.arguments = ["show", "--last", "3m", "--style", "compact", "--predicate",
+                       "process BEGINSWITH \"Cisco\" OR process BEGINSWITH \"vpnagent\" OR process == \"acsockext\" OR subsystem BEGINSWITH \"com.cisco\""]
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = pipe
+        var sys = ""
+        if (try? p.run()) != nil {
+            let box = DataBox()
+            let g = DispatchGroup()
+            g.enter()
+            DispatchQueue.global().async { box.data = pipe.fileHandleForReading.readDataToEndOfFile(); g.leave() }
+            if g.wait(timeout: .now() + 20) == .timedOut { p.terminate() }
+            let lines = String(decoding: box.data, as: UTF8.self).split(separator: "\n")
+            sys = lines.suffix(150).joined(separator: "\n")
+        }
+        writeLog("výpadok: " + reason, st + "\n--- systémový log Cisca (posledné 3 min) ---\n" + sys, "")
     }
 
     func friendly(_ output: String, _ prof: VpnProfile) -> (String, String) {

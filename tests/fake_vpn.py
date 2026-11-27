@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Simulácia Cisco CLI `vpn` na testy (výzvy bez nového riadku, ako skutočné CLI).
 
-FAKE_SCENARIO: ok | banner | badpw | untrusted | unknown | error | group | nouser
+FAKE_SCENARIO: ok | banner | badpw | untrusted | unknown | error | group | nouser | drop
 FAKE_STATE: súbor so stavom (Connected/Disconnected)
 """
 import os
@@ -114,6 +114,10 @@ def main():
         time.sleep(0.2)
         set_state("Connected")
         out("  >> notice: Establishing VPN - Configuring system...\n  >> state: Connected\nVPN> ")
+        if SC == "drop":
+            time.sleep(0.5)
+            set_state("Disconnected")
+            out("  >> state: Disconnecting\n  >> notice: The VPN connection was terminated.\n  >> state: Disconnected\nVPN> ")
 
 
 if __name__ == "__main__":

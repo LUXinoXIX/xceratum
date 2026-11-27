@@ -203,6 +203,7 @@ final class ConnectTests: XCTestCase {
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: wrapper.path)
         setenv("FAKE_STATE", dir.appendingPathComponent("state").path, 1)
         cli = CiscoCLI(configured: wrapper.path, timeout: 30, logURL: dir.appendingPathComponent("log.txt"))
+        cli.settleSeconds = 1.5
     }
 
     override func tearDown() {
@@ -247,6 +248,14 @@ final class ConnectTests: XCTestCase {
         cli.disconnect()
         let d = cli.connect(prof, .init(user: "jnovak", password: "tajne123456"), ask: { _, _ in false })
         XCTAssertEqual(d.result, .declined)
+    }
+
+    /// Cisco hlási Connected, ale spojenie hneď ukončí – aplikácia nesmie ukázať „Pripojené“.
+    func testConnectedThenDropped() {
+        setenv("FAKE_SCENARIO", "drop", 1)
+        let o = cli.connect(prof, .init(user: "jnovak", password: "tajne123456"))
+        XCTAssertEqual(o.result, .failed, o.error)
+        XCTAssertEqual(cli.state(), "Disconnected")
     }
 
     func testServerError() {
